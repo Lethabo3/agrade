@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { listen } from "@tauri-apps/api/event";
 import { createClient } from "@supabase/supabase-js";
 import "./App.css";
 
@@ -49,6 +50,27 @@ export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
+  const handleDeepLink = (url: string) => {
+    try {
+      console.log("handleDeepLink called with:", url);
+      const parsed = new URL(url);
+      const accessToken = parsed.searchParams.get("token");
+      const refreshToken = parsed.searchParams.get("refresh");
+      console.log("accessToken:", accessToken ? "present" : "missing");
+      console.log("refreshToken:", refreshToken ? "present" : "missing");
+      if (accessToken && refreshToken) {
+        supabase.auth.setSession({
+          access_token: decodeURIComponent(accessToken),
+          refresh_token: decodeURIComponent(refreshToken),
+        }).then(({ data, error }) => {
+          console.log("setSession:", data?.session ? "success" : "failed", error?.message ?? "");
+        });
+      }
+    } catch (e) {
+      console.error("Deep link parse error:", e);
+    }
+  };
+
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       console.log("onAuthStateChange fired, session:", session ? "present" : "null");
@@ -71,28 +93,19 @@ export default function App() {
 
   useEffect(() => {
     const unlisten = onOpenUrl((urls) => {
-      console.log("Deep link received:", urls);
-      const url = urls[0];
-      try {
-        const parsed = new URL(url);
-        const accessToken = parsed.searchParams.get("token");
-        const refreshToken = parsed.searchParams.get("refresh");
-        console.log("accessToken:", accessToken ? "present" : "missing");
-        console.log("refreshToken:", refreshToken ? "present" : "missing");
-        if (accessToken && refreshToken) {
-          supabase.auth.setSession({
-            access_token: decodeURIComponent(accessToken),
-            refresh_token: decodeURIComponent(refreshToken),
-          }).then(({ data, error }) => {
-            console.log("setSession result:", data?.session ? "session set" : "no session", error?.message ?? "no error");
-          });
-        }
-      } catch (e) {
-        console.error("Deep link parse error:", e);
-      }
+      console.log("onOpenUrl received:", urls);
+      handleDeepLink(urls[0]);
     });
 
-    return () => { unlisten.then(fn => fn()); };
+    const unlistenTauri = listen("deep-link-received", (event) => {
+      console.log("deep-link-received event:", event.payload);
+      handleDeepLink(event.payload as string);
+    });
+
+    return () => {
+      unlisten.then(fn => fn());
+      unlistenTauri.then(fn => fn());
+    };
   }, []);
 
   const handleSignOut = async () => {
