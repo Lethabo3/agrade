@@ -10,9 +10,7 @@ import "./App.css";
 
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const LOGIN_URL = "https://sekotonjabulo-rgb.github.io/agrade-web/login.html?source=app";
-
-const WEEKLY_CHECKOUT = "https://sparksocial.lemonsqueezy.com/checkout/buy/801ef0b0-f6fd-4a28-bac2-4f67e6d7333c";
-const MONTHLY_CHECKOUT = "https://sparksocial.lemonsqueezy.com/checkout/buy/b7fb5b1f-3ebf-4654-992c-5c08e9c3eb08";
+const PRICING_BASE_URL = "https://sekotonjabulo-rgb.github.io/agrade-web/index.html#pricing";
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -110,12 +108,13 @@ export default function App() {
     };
   }, []);
 
-  const handleUpgrade = async (plan: "weekly" | "monthly") => {
+  const handleUpgrade = async () => {
     const { data } = await supabase.auth.getUser();
     const userId = data?.user?.id;
-    const baseUrl = plan === "weekly" ? WEEKLY_CHECKOUT : MONTHLY_CHECKOUT;
-    const checkoutUrl = userId ? `${baseUrl}?checkout[custom][user_id]=${userId}` : baseUrl;
-    open(checkoutUrl);
+    const pricingUrl = userId
+      ? `${PRICING_BASE_URL}?user_id=${userId}`
+      : PRICING_BASE_URL;
+    open(pricingUrl);
   };
 
   const handleSignOut = async () => {
@@ -344,14 +343,9 @@ export default function App() {
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
                   <p className="hud-limit-text">You've used your 5 free messages</p>
-                  <div className="hud-upgrade-options">
-                    <button className="hud-upgrade-btn" onClick={() => handleUpgrade("weekly")}>
-                      Weekly — $6
-                    </button>
-                    <button className="hud-upgrade-btn" onClick={() => handleUpgrade("monthly")}>
-                      Monthly — $14
-                    </button>
-                  </div>
+                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>
+                    Upgrade to Pro
+                  </button>
                 </div>
               ) : (
                 <div key={i} className="hud-ai-response">{msg.text}</div>
