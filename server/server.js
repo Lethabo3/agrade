@@ -135,8 +135,7 @@ app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
 
     const systemMessage = {
       role: "system",
-      content:
-        "You are agrade, a helpful AI assistant that can see the user's screen and answer questions. Be concise and direct. When analyzing screens, focus on what's relevant to the user's question. If no question is asked, describe what you see and offer to help.",
+      content: "You are agrade, a helpful AI assistant that can see the user's screen and answer questions. Be concise and direct. When analyzing screens, focus on what's relevant to the user's question. If no question is asked, describe what you see and offer to help.",
     };
 
     const conversationHistory = history.map((entry) => ({
@@ -193,53 +192,39 @@ app.post("/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), as
     const signingSecret = process.env.LEMONSQUEEZY_SIGNING_SECRET;
     const signature = req.headers["x-signature"];
     const hmac = crypto.createHmac("sha256", signingSecret);
-    const digest = hmac.update(req.body).digest("hex");
+    hmac.update(req.body);
+    const digest = hmac.digest("hex");
 
-    if (signature !== digest) {
-      console.log("Invalid LemonSqueezy signature");
-      return res.status(400).json({ error: "Invalid signature" });
+    if (digest !== signature) {
+      console.log("Webhook signature mismatch");
+      return res.status(401).json({ error: "Invalid signature" });
     }
 
     const event = JSON.parse(req.body);
     const eventName = event.meta.event_name;
     const userId = event.meta.custom_data?.user_id;
-    const plan = event.data.attributes.variant_name?.toLowerCase().includes("weekly") ? "weekly" : "monthly";
-    const periodEnd = event.data.attributes.renews_at || event.data.attributes.ends_at;
 
-    console.log("LemonSqueezy event:", eventName, "userId:", userId, "plan:", plan);
+    console.log("Webhook event:", eventName, "userId:", userId);
 
     if (!userId) {
-      console.log("No user_id in custom_data, skipping");
+      console.log("No user_id in webhook custom data");
       return res.sendStatus(200);
     }
 
+    const variantName = event.data.attributes.variant_name?.toLowerCase() ?? "";
+    const plan = variantName.includes("monthly") ? "monthly" : "weekly";
+    const periodEnd = event.data.attributes.ends_at || event.data.attributes.renews_at;
+
     if (eventName === "subscription_created" || eventName === "subscription_updated") {
       const status = event.data.attributes.status === "active" ? "active" : "inactive";
-
-      const { data: existing } = await supabase
-        .from("subscriptions")
-        .select("id")
-        .eq("user_id", userId)
-        .single();
-
-      if (existing) {
-        await supabase
-          .from("subscriptions")
-          .update({
-            plan,
-            status,
-            current_period_end: periodEnd,
-          })
-          .eq("user_id", userId);
-      } else {
-        await supabase.from("subscriptions").insert({
-          user_id: userId,
-          plan,
-          status,
-          current_period_start: new Date().toISOString(),
-          current_period_end: periodEnd,
-        });
-      }
+      const { error } = await supabase.from("subscriptions").upsert({
+        user_id: userId,
+        plan,
+        status,
+        current_period_start: new Date().toISOString(),
+        current_period_end: periodEnd ? new Date(periodEnd).toISOString() : null,
+      }, { onConflict: "user_id" });
+      console.log("Upsert subscription error:", error?.message ?? "none");
     }
 
     if (eventName === "subscription_cancelled") {
@@ -247,6 +232,7 @@ app.post("/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), as
         .from("subscriptions")
         .update({ status: "cancelled" })
         .eq("user_id", userId);
+      console.log("Subscription cancelled for user:", userId);
     }
 
     res.sendStatus(200);
