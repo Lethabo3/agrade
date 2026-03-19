@@ -44,15 +44,23 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [message, setMessage] = useState<string>("");
   const [token, setToken] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const tokenRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.access_token) {
+        tokenRef.current = session.access_token;
         setToken(session.access_token);
-      } else {
+        setAuthReady(true);
+      } else if (authReady) {
+        tokenRef.current = null;
         setToken(null);
+        open(LOGIN_URL);
+      } else {
+        setAuthReady(true);
         open(LOGIN_URL);
       }
     });
@@ -85,6 +93,7 @@ export default function App() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
+    tokenRef.current = null;
     setToken(null);
     setMessages([]);
     setHistory([]);
@@ -120,7 +129,7 @@ export default function App() {
       if (base64Image) body.base64Image = base64Image;
 
       const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
 
       const res = await fetch(SERVER_URL, {
         method: "POST",
@@ -144,6 +153,7 @@ export default function App() {
 
       if (res.status === 401) {
         await supabase.auth.signOut();
+        tokenRef.current = null;
         setToken(null);
         open(LOGIN_URL);
         setIsLoading(false);
