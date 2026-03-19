@@ -1,10 +1,10 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
 
 if (!process.env.SUPABASE_SERVICE_KEY) {
   console.error("FATAL: SUPABASE_SERVICE_KEY is not set");
@@ -98,7 +98,7 @@ app.get("/health", async (req, res) => {
   res.json({ db: "ok", data });
 });
 
-app.post("/ask", async (req, res) => {
+app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
   try {
     const { base64Image, message, history = [] } = req.body;
     const token = req.headers.authorization?.replace("Bearer ", "");
@@ -185,6 +185,74 @@ app.post("/ask", async (req, res) => {
   } catch (err) {
     console.error("ERROR:", err.message);
     res.status(500).json({ error: "Failed to reach Groq" });
+  }
+});
+
+app.post("/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const signingSecret = process.env.LEMONSQUEEZY_SIGNING_SECRET;
+    const signature = req.headers["x-signature"];
+    const hmac = crypto.createHmac("sha256", signingSecret);
+    const digest = hmac.update(req.body).digest("hex");
+
+    if (signature !== digest) {
+      console.log("Invalid LemonSqueezy signature");
+      return res.status(400).json({ error: "Invalid signature" });
+    }
+
+    const event = JSON.parse(req.body);
+    const eventName = event.meta.event_name;
+    const userId = event.meta.custom_data?.user_id;
+    const plan = event.data.attributes.variant_name?.toLowerCase().includes("weekly") ? "weekly" : "monthly";
+    const periodEnd = event.data.attributes.renews_at || event.data.attributes.ends_at;
+
+    console.log("LemonSqueezy event:", eventName, "userId:", userId, "plan:", plan);
+
+    if (!userId) {
+      console.log("No user_id in custom_data, skipping");
+      return res.sendStatus(200);
+    }
+
+    if (eventName === "subscription_created" || eventName === "subscription_updated") {
+      const status = event.data.attributes.status === "active" ? "active" : "inactive";
+
+      const { data: existing } = await supabase
+        .from("subscriptions")
+        .select("id")
+        .eq("user_id", userId)
+        .single();
+
+      if (existing) {
+        await supabase
+          .from("subscriptions")
+          .update({
+            plan,
+            status,
+            current_period_end: periodEnd,
+          })
+          .eq("user_id", userId);
+      } else {
+        await supabase.from("subscriptions").insert({
+          user_id: userId,
+          plan,
+          status,
+          current_period_start: new Date().toISOString(),
+          current_period_end: periodEnd,
+        });
+      }
+    }
+
+    if (eventName === "subscription_cancelled") {
+      await supabase
+        .from("subscriptions")
+        .update({ status: "cancelled" })
+        .eq("user_id", userId);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.status(500).json({ error: "Webhook processing failed" });
   }
 });
 
