@@ -48,22 +48,17 @@ export default function App() {
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data }) => {
-      if (data.session) {
-        const { data: userData, error } = await supabase.auth.getUser(
-          data.session.access_token
-        );
-        if (error || !userData.user) {
-          await supabase.auth.signOut();
-          setToken(null);
-          open(LOGIN_URL);
-        } else {
-          setToken(data.session.access_token);
-        }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.access_token) {
+        setToken(session.access_token);
       } else {
+        setToken(null);
         open(LOGIN_URL);
       }
     });
+  
+    return () => subscription.unsubscribe();
+  }, []);
 
     const unlisten = onOpenUrl((urls) => {
       const url = urls[0];
