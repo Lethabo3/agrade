@@ -56,10 +56,11 @@ export default function App() {
         open(LOGIN_URL);
       }
     });
-  
+
     return () => subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
     const unlisten = onOpenUrl((urls) => {
       const url = urls[0];
       try {
@@ -70,10 +71,6 @@ export default function App() {
           supabase.auth.setSession({
             access_token: decodeURIComponent(accessToken),
             refresh_token: decodeURIComponent(refreshToken),
-          }).then(({ data }) => {
-            if (data.session) {
-              setToken(data.session.access_token);
-            }
           });
         }
       } catch (e) {
