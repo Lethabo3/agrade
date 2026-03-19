@@ -10,7 +10,7 @@ import "./App.css";
 
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const LOGIN_URL = "https://sekotonjabulo-rgb.github.io/agrade-web/login.html?source=app";
-const PRICING_BASE_URL = "https://sekotonjabulo-rgb.github.io/agrade-web/index.html#pricing";
+const PRICING_BASE_URL = "https://sekotonjabulo-rgb.github.io/agrade-web/pricing.html";
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
