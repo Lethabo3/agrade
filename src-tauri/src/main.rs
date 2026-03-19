@@ -1,8 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use screenshots::Screen;
 use std::io::Cursor;
-use std::io::Write;
-use std::fs::OpenOptions;
 use image::ImageEncoder;
 use tauri::Emitter;
 use tauri::Manager;
@@ -16,20 +14,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, WS_EX_LAYERED, WDA_EXCLUDEFROMCAPTURE,
 };
 
-fn log(msg: &str) {
-    let path = "C:\\Users\\Lenovo\\Desktop\\agrade_debug.log".to_string();
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .unwrap();
-    writeln!(file, "{}", msg).unwrap();
-}
-
 #[cfg(target_os = "windows")]
 fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
     unsafe {
-        log("Applying stealth flags...");
         let current_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
         SetWindowLongW(
             hwnd,
@@ -37,21 +24,18 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
             current_style | WS_EX_LAYERED.0 as i32,
         );
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
-        log("Stealth flags applied successfully");
     }
     Ok(())
 }
 
 #[tauri::command]
 fn capture_screen() -> String {
-    log("capture_screen called");
     let screens = match Screen::all() {
         Ok(s) => s,
         Err(e) => return format!("Screen capture failed: {}", e),
     };
     let screen = &screens[0];
     let image = screen.capture().unwrap();
-    log(&format!("Captured {}x{}", image.width(), image.height()));
     let mut bytes: Vec<u8> = Vec::new();
     PngEncoder::new(Cursor::new(&mut bytes))
         .write_image(
@@ -61,13 +45,10 @@ fn capture_screen() -> String {
             image::ColorType::Rgba8.into(),
         )
         .unwrap();
-    let base64 = general_purpose::STANDARD.encode(&bytes);
-    log(&format!("Base64 length: {}", base64.len()));
-    base64
+    general_purpose::STANDARD.encode(&bytes)
 }
 
 fn main() {
-    log("App starting...");
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(url) = argv.iter().find(|a| a.starts_with("agrade://")) {
@@ -82,7 +63,6 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![capture_screen])
         .setup(|app| {
-            log("Setup running...");
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
@@ -96,7 +76,6 @@ fn main() {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 app.deep_link().register("agrade").unwrap();
             }
-            log("Setup complete");
             Ok(())
         })
         .run(tauri::generate_context!())
