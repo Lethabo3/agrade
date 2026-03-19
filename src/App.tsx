@@ -51,6 +51,7 @@ export default function App() {
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      console.log("onAuthStateChange fired, session:", session ? "present" : "null");
       if (session?.access_token) {
         tokenRef.current = session.access_token;
         setToken(session.access_token);
@@ -70,15 +71,20 @@ export default function App() {
 
   useEffect(() => {
     const unlisten = onOpenUrl((urls) => {
+      console.log("Deep link received:", urls);
       const url = urls[0];
       try {
         const parsed = new URL(url);
         const accessToken = parsed.searchParams.get("token");
         const refreshToken = parsed.searchParams.get("refresh");
+        console.log("accessToken:", accessToken ? "present" : "missing");
+        console.log("refreshToken:", refreshToken ? "present" : "missing");
         if (accessToken && refreshToken) {
           supabase.auth.setSession({
             access_token: decodeURIComponent(accessToken),
             refresh_token: decodeURIComponent(refreshToken),
+          }).then(({ data, error }) => {
+            console.log("setSession result:", data?.session ? "session set" : "no session", error?.message ?? "no error");
           });
         }
       } catch (e) {
@@ -86,9 +92,7 @@ export default function App() {
       }
     });
 
-    return () => {
-      unlisten.then(fn => fn());
-    };
+    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   const handleSignOut = async () => {
@@ -130,6 +134,8 @@ export default function App() {
 
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+
+      console.log("Sending request, token:", tokenRef.current ? "present" : "missing");
 
       const res = await fetch(SERVER_URL, {
         method: "POST",
