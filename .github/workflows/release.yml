@@ -49,6 +49,9 @@ jobs:
       - run: npm run tauri build
         env:
           VITE_GROQ_API_KEY: ${{ secrets.VITE_GROQ_API_KEY }}
+      - name: Rename binary
+        run: mv src-tauri/target/release/copilot-overlay.exe src-tauri/target/release/agrade.exe
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: agrade-windows
@@ -58,6 +61,6 @@ jobs:
         with:
           tag_name: v${{ github.run_number }}
           name: agrade ${{ github.run_number }}
-          files: src-tauri/target/release/copilot-overlay.exe
+          files: src-tauri/target/release/agrade.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
