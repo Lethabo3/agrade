@@ -1,5 +1,4 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 use screenshots::Screen;
 use std::io::Cursor;
 use std::io::Write;
@@ -9,7 +8,6 @@ use tauri::Emitter;
 use tauri::Manager;
 use image::codecs::png::PngEncoder;
 use base64::{Engine as _, engine::general_purpose};
-
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
@@ -90,6 +88,7 @@ fn main() {
                 use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
+                main_window.open_devtools();
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
             }
