@@ -102,9 +102,18 @@ export default function App() {
       handleDeepLink(event.payload as string);
     });
 
+    const unlistenFocus = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        setTimeout(() => {
+          invoke("reapply_stealth").catch(() => {});
+        }, 300);
+      }
+    });
+
     return () => {
       unlisten.then(fn => fn());
       unlistenTauri.then(fn => fn());
+      unlistenFocus.then(fn => fn());
     };
   }, []);
 
@@ -248,11 +257,10 @@ export default function App() {
         const win = getCurrentWindow();
         await win.show();
         await win.setFocus();
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, 300));
         await invoke("reapply_stealth");
       });
       await register("Control+H", async () => {
-        await invoke("reapply_stealth");
         await getCurrentWindow().hide();
       });
       const STEP = 40;
