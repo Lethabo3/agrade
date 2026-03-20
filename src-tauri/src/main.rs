@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use screenshots::Screen;
 use std::io::Cursor;
+use std::path::PathBuf;
+use std::process::Command;
 use image::ImageEncoder;
 use tauri::Emitter;
 use tauri::Manager;
@@ -76,6 +78,31 @@ fn get_secondary_monitor_position() -> Option<(i32, i32)> {
     }
 }
 
+fn install_virtual_display(resource_dir: PathBuf) {
+    let drivers_dir = resource_dir.join("drivers");
+    let cert = drivers_dir.join("iddsampledriver.cer");
+    let inf = drivers_dir.join("iddsampledriver.inf");
+
+    if !cert.exists() || !inf.exists() {
+        return;
+    }
+
+    Command::new("certutil")
+        .args(["-addstore", "-f", "root", cert.to_str().unwrap()])
+        .output()
+        .ok();
+
+    Command::new("certutil")
+        .args(["-addstore", "-f", "TrustedPublisher", cert.to_str().unwrap()])
+        .output()
+        .ok();
+
+    Command::new("pnputil")
+        .args(["/add-driver", inf.to_str().unwrap(), "/install"])
+        .output()
+        .ok();
+}
+
 #[tauri::command]
 fn capture_screen() -> String {
     let screens = match Screen::all() {
@@ -111,6 +138,9 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![capture_screen])
         .setup(|app| {
+            let resource_dir = app.path().resource_dir().unwrap();
+            install_virtual_display(resource_dir);
+
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
