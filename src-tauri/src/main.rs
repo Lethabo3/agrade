@@ -31,6 +31,12 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::UI::Controls::MARGINS;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+#[cfg(target_os = "windows")]
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+};
+#[cfg(target_os = "windows")]
+use windows::core::Interface;
 
 #[cfg(target_os = "windows")]
 fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
@@ -185,6 +191,19 @@ fn main() {
                 use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
+
+                main_window.with_webview(|webview| {
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        let controller: ICoreWebView2Controller2 = webview
+                            .controller()
+                            .cast()
+                            .unwrap();
+                        controller.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                            R: 0, G: 0, B: 0, A: 0,
+                        }).unwrap();
+                    }
+                }).ok();
 
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
