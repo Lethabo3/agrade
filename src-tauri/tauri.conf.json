@@ -22,7 +22,6 @@
         "backgroundColor": "#00000000",
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": false,
         "dragDropEnabled": true
       }
     ],
