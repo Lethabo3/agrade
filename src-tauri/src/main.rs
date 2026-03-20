@@ -12,7 +12,14 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, SetWindowDisplayAffinity,
     GWL_EXSTYLE, WS_EX_LAYERED, WDA_EXCLUDEFROMCAPTURE,
+    SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO, HDC, HMONITOR,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
 
 #[cfg(target_os = "windows")]
 fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
@@ -26,6 +33,47 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn monitor_enum_proc(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    let monitors = &mut *(lparam.0 as *mut Vec<HMONITOR>);
+    monitors.push(hmonitor);
+    BOOL(1)
+}
+
+#[cfg(target_os = "windows")]
+fn get_secondary_monitor_position() -> Option<(i32, i32)> {
+    unsafe {
+        let mut monitors: Vec<HMONITOR> = Vec::new();
+        EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(monitor_enum_proc),
+            LPARAM(&mut monitors as *mut Vec<HMONITOR> as isize),
+        );
+
+        if monitors.len() < 2 {
+            return None;
+        }
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+
+        for monitor in &monitors[1..] {
+            if GetMonitorInfoW(*monitor, &mut info).as_bool() {
+                return Some((info.rcWork.left, info.rcWork.top));
+            }
+        }
+        None
+    }
 }
 
 #[tauri::command]
@@ -68,8 +116,23 @@ fn main() {
                 use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
+
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
+
+                if let Some((x, y)) = get_secondary_monitor_position() {
+                    unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            HWND_TOPMOST,
+                            x + 20,
+                            y + 20,
+                            0,
+                            0,
+                            SWP_NOSIZE,
+                        ).ok();
+                    }
+                }
             }
             #[cfg(desktop)]
             {
