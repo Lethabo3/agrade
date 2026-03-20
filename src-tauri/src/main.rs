@@ -3,6 +3,8 @@ use screenshots::Screen;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 use image::ImageEncoder;
 use tauri::Emitter;
 use tauri::Manager;
@@ -152,6 +154,10 @@ fn reapply_stealth(window: tauri::WebviewWindow) -> Result<(), String> {
     {
         let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
         apply_stealth_flags(hwnd).map_err(|e| e.to_string())?;
+        thread::sleep(Duration::from_millis(50));
+        apply_stealth_flags(hwnd).map_err(|e| e.to_string())?;
+        thread::sleep(Duration::from_millis(100));
+        apply_stealth_flags(hwnd).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -179,6 +185,7 @@ fn main() {
                 use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
+                main_window.hide().unwrap();
 
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
@@ -196,6 +203,14 @@ fn main() {
                         ).ok();
                     }
                 }
+
+                let main_window_clone = main_window.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(800));
+                    main_window_clone.show().unwrap();
+                    let hwnd2 = HWND(main_window_clone.hwnd().unwrap().0 as *mut core::ffi::c_void);
+                    apply_stealth_flags(hwnd2).ok();
+                });
             }
             #[cfg(desktop)]
             {
