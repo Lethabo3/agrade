@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO, HDC, HMONITOR,
+    EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO, HDC, HMONITOR, HRGN,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dwm::{
@@ -52,7 +52,7 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
         let blur = DWM_BLURBEHIND {
             dwFlags: 0x00000001,
             fEnable: true.into(),
-            hRgnBlur: None,
+            hRgnBlur: HRGN(std::ptr::null_mut()),
             fTransitionOnMaximized: false.into(),
         };
         DwmEnableBlurBehindWindow(hwnd, &blur)?;
