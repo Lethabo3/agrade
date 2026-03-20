@@ -6,6 +6,7 @@ use std::process::Command;
 use image::ImageEncoder;
 use tauri::Emitter;
 use tauri::Manager;
+use tauri::window::Color;
 use image::codecs::png::PngEncoder;
 use base64::{Engine as _, engine::general_purpose};
 #[cfg(target_os = "windows")]
@@ -179,7 +180,7 @@ fn main() {
                 use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
-                main_window.set_background_color(Some(tauri::Color(0, 0, 0, 0))).ok();
+                main_window.set_background_color(Some(Color(0, 0, 0, 0))).ok();
 
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
