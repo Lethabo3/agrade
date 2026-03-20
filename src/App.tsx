@@ -248,8 +248,12 @@ export default function App() {
         const win = getCurrentWindow();
         await win.show();
         await win.setFocus();
+        await invoke("reapply_stealth");
       });
-      await register("Control+H", async () => { await getCurrentWindow().hide(); });
+      await register("Control+H", async () => {
+        await invoke("reapply_stealth");
+        await getCurrentWindow().hide();
+      });
       const STEP = 40;
       await register("Control+Left", async () => {
         const win = getCurrentWindow();
