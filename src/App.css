@@ -7,6 +7,10 @@
   --input-bg: rgba(255, 255, 255, 0.07);
 }
 
+html {
+  background: transparent !important;
+}
+
 body { background: transparent; overflow: hidden; }
 
 .hud-limit-block {
@@ -42,6 +46,7 @@ body { background: transparent; overflow: hidden; }
   height: 100vh;
   display: flex;
   flex-direction: column;
+    background: transparent;
   font-family: -apple-system, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', sans-serif;
 }
 
