@@ -146,6 +146,16 @@ fn capture_screen() -> String {
     general_purpose::STANDARD.encode(&bytes)
 }
 
+#[tauri::command]
+fn reapply_stealth(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
+        apply_stealth_flags(hwnd).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -159,7 +169,7 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![capture_screen])
+        .invoke_handler(tauri::generate_handler![capture_screen, reapply_stealth])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
             install_virtual_display(resource_dir);
