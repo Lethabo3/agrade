@@ -45,8 +45,7 @@
     "nsis": {
       "installerIcon": "icons/icon.ico",
       "installMode": "perMachine",
-      "installerSidebar": null,
-      "preInstallSection": "!include LogicLib.nsh\n\nSection \"Install Virtual Display Driver\" SecDriver\n  SetOutPath \"$INSTDIR\\drivers\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.inf\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.cat\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.dll\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\installCert.bat\"\n  ExecWait '\"$SYSDIR\\pnputil.exe\" /add-driver \"$INSTDIR\\drivers\\iddsampledriver.inf\" /install'\nSectionEnd"
+      "preInstallSection": "!include LogicLib.nsh\n\nSection \"Install Virtual Display Driver\" SecDriver\n  CreateDirectory \"C:\\IddSampleDriver\"\n  SetOutPath \"C:\\IddSampleDriver\"\n  File \"/oname=option.txt\" \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\option.txt\"\n  SetOutPath \"$INSTDIR\\drivers\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.inf\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.cat\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.dll\"\n  File \"${TAURI_BUNDLE_RESOURCES_PATH}\\drivers\\iddsampledriver.cer\"\n  ExecWait '\"$SYSDIR\\pnputil.exe\" /add-driver \"$INSTDIR\\drivers\\iddsampledriver.inf\" /install'\nSectionEnd"
     }
   },
   "plugins": {
