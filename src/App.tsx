@@ -248,6 +248,7 @@ export default function App() {
         const win = getCurrentWindow();
         await win.show();
         await win.setFocus();
+        await new Promise(resolve => setTimeout(resolve, 100));
         await invoke("reapply_stealth");
       });
       await register("Control+H", async () => {
