@@ -21,6 +21,13 @@ use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO, HDC, HMONITOR,
 };
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Dwm::{
+    DwmExtendFrameIntoClientArea, DwmEnableBlurBehindWindow,
+    DWM_BLURBEHIND,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Controls::MARGINS;
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
 
 #[cfg(target_os = "windows")]
@@ -33,6 +40,22 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
             current_style | WS_EX_LAYERED.0 as i32,
         );
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
+
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        DwmExtendFrameIntoClientArea(hwnd, &margins)?;
+
+        let blur = DWM_BLURBEHIND {
+            dwFlags: 0x00000001,
+            fEnable: true.into(),
+            hRgnBlur: None,
+            fTransitionOnMaximized: false.into(),
+        };
+        DwmEnableBlurBehindWindow(hwnd, &blur)?;
     }
     Ok(())
 }
