@@ -20,6 +20,7 @@
         "decorations": false,
         "transparent": true,
         "backgroundColor": "#00000000",
+        "visible": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "dragDropEnabled": true
