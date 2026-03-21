@@ -254,14 +254,11 @@ export default function App() {
         setMessage("");
       });
       await register("CommandOrControl+B", async () => {
-        const win = getCurrentWindow();
-        await win.show();
-        await win.setFocus();
-        await new Promise(resolve => setTimeout(resolve, 300));
-        await invoke("reapply_stealth");
+        await invoke("show_window");
+        await getCurrentWindow().setFocus();
       });
       await register("Control+H", async () => {
-        await getCurrentWindow().hide();
+        await invoke("hide_window");
       });
       const STEP = 40;
       await register("Control+Left", async () => {
