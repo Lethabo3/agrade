@@ -13,13 +13,10 @@ use base64::{Engine as _, engine::general_purpose};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::COLORREF;
-#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, SetWindowDisplayAffinity,
     GWL_EXSTYLE, WS_EX_LAYERED, WDA_EXCLUDEFROMCAPTURE,
     SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
-    SetLayeredWindowAttributes, LWA_COLORKEY,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
@@ -27,11 +24,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmEnableBlurBehindWindow,
-    DWM_BLURBEHIND,
+    DwmEnableBlurBehindWindow, DWM_BLURBEHIND,
 };
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::Controls::MARGINS;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
 
@@ -45,21 +39,6 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
             current_style | WS_EX_LAYERED.0 as i32,
         );
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
-
-        SetLayeredWindowAttributes(
-            hwnd,
-            COLORREF(0x00030201),
-            0,
-            LWA_COLORKEY,
-        ).ok();
-
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
-        };
-        DwmExtendFrameIntoClientArea(hwnd, &margins)?;
 
         let blur = DWM_BLURBEHIND {
             dwFlags: 0x00000001,
