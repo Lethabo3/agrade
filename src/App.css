@@ -9,9 +9,12 @@
 
 html {
   background: transparent !important;
+  border: none !important;
+  outline: none !important;
 }
 
-body { background: transparent; overflow: hidden; }
+body { background: transparent; overflow: hidden; border: none !important;
+  outline: none !important;}
 
 .hud-limit-block {
   display: flex;
@@ -44,6 +47,8 @@ body { background: transparent; overflow: hidden; }
 
 .hud-root {
   height: 100vh;
+  border: none !important;
+  outline: none !important;
   display: flex;
   flex-direction: column;
     background: transparent;
