@@ -11,7 +11,7 @@ html {
   background: transparent !important;
 }
 
-body { background: rgb(1, 2, 3); overflow: hidden; }
+body { background: transparent; overflow: hidden; }
 
 .hud-limit-block {
   display: flex;
