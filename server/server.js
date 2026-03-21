@@ -88,6 +88,36 @@ async function checkAndIncrementUsage(userId) {
   return { allowed: true, remaining: FREE_LIMIT - usage.message_count - 1 };
 }
 
+async function handleReferral(referrerId, referredId) {
+  if (!referrerId || !referredId) return;
+
+  await supabase.from("referrals").insert({
+    referrer_id: referrerId,
+    referred_id: referredId,
+  });
+
+  const { count } = await supabase
+    .from("referrals")
+    .select("*", { count: "exact", head: true })
+    .eq("referrer_id", referrerId);
+
+  console.log("Referral count for", referrerId, ":", count);
+
+  if (count >= 2) {
+    const existing = await getSubscription(referrerId);
+    if (!existing) {
+      const { error } = await supabase.from("subscriptions").upsert({
+        user_id: referrerId,
+        plan: "weekly",
+        status: "active",
+        current_period_start: new Date().toISOString(),
+        current_period_end: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      }, { onConflict: "user_id" });
+      console.log("Referral subscription upsert error:", error?.message ?? "none");
+    }
+  }
+}
+
 app.get("/", (req, res) => {
   res.status(200).send("ok");
 });
@@ -185,6 +215,45 @@ app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
     console.error("ERROR:", err.message);
     res.status(500).json({ error: "Failed to reach Groq" });
   }
+});
+
+app.post("/referral", express.json(), async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    const { ref } = req.body;
+
+    const user = await getUserFromToken(token);
+    if (!user) return res.status(401).json({ error: "Unauthorized" });
+    if (!ref) return res.status(400).json({ error: "No referrer" });
+    if (ref === user.id) return res.status(400).json({ error: "Cannot refer yourself" });
+
+    const { data: existing } = await supabase
+      .from("referrals")
+      .select("id")
+      .eq("referred_id", user.id)
+      .single();
+
+    if (existing) return res.status(200).json({ message: "Already referred" });
+
+    await handleReferral(ref, user.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Referral error:", err.message);
+    res.status(500).json({ error: "Referral failed" });
+  }
+});
+
+app.get("/referrals", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  const user = await getUserFromToken(token);
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+
+  const { count } = await supabase
+    .from("referrals")
+    .select("*", { count: "exact", head: true })
+    .eq("referrer_id", user.id);
+
+  res.json({ count: count || 0, needed: 2 });
 });
 
 app.post("/webhooks/lemonsqueezy", express.raw({ type: "application/json" }), async (req, res) => {
