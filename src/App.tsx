@@ -9,8 +9,8 @@ import { createClient } from "@supabase/supabase-js";
 import "./App.css";
 
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
-const LOGIN_URL = "http://agradee.online/login.html?source=app";
-const PRICING_BASE_URL = "http://agradee.online/pricing.html";
+const LOGIN_URL = "https://agradee.online/login.html?source=app";
+const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
