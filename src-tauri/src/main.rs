@@ -13,10 +13,13 @@ use base64::{Engine as _, engine::general_purpose};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 #[cfg(target_os = "windows")]
+use windows::Win32::Foundation::COLORREF;
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, SetWindowDisplayAffinity,
-    GWL_EXSTYLE, WS_EX_LAYERED, WDA_EXCLUDEFROMCAPTURE,
+    GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WDA_EXCLUDEFROMCAPTURE,
     SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
+    SetLayeredWindowAttributes, LWA_ALPHA,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
@@ -151,6 +154,49 @@ fn reapply_stealth(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn hide_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        SetWindowLongW(
+            hwnd,
+            GWL_EXSTYLE,
+            style | WS_EX_TRANSPARENT.0 as i32 | WS_EX_LAYERED.0 as i32,
+        );
+        SetLayeredWindowAttributes(
+            hwnd,
+            COLORREF(0),
+            0,
+            LWA_ALPHA,
+        ).ok();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        SetWindowLongW(
+            hwnd,
+            GWL_EXSTYLE,
+            (style & !(WS_EX_TRANSPARENT.0 as i32)) | WS_EX_LAYERED.0 as i32,
+        );
+        SetLayeredWindowAttributes(
+            hwnd,
+            COLORREF(0),
+            255,
+            LWA_ALPHA,
+        ).ok();
+        apply_stealth_flags(hwnd).ok();
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -164,7 +210,12 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![capture_screen, reapply_stealth])
+        .invoke_handler(tauri::generate_handler![
+            capture_screen,
+            reapply_stealth,
+            hide_window,
+            show_window
+        ])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
             install_virtual_display(resource_dir);
