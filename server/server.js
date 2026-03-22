@@ -122,6 +122,10 @@ app.get("/", (req, res) => {
   res.status(200).send("ok");
 });
 
+app.get("/download", (req, res) => {
+  res.redirect("https://github.com/Lethabo3/agrade/releases/latest/download/agrade_0.1.0_x64-setup.exe");
+});
+
 app.get("/health", async (req, res) => {
   const { data, error } = await supabase.from("message_usage").select("count").limit(1);
   if (error) return res.status(500).json({ db: "error", detail: error.message });
