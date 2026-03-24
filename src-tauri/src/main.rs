@@ -248,10 +248,10 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
     let (width, height) = img.dimensions();
     let mut found: Vec<(f64, f64)> = Vec::new();
 
-    let scan_x_max = (width as f32 * 0.15) as u32;
-    let scan_y_min = (height as f32 * 0.22) as u32;
-    let scan_y_max = (height as f32 * 0.92) as u32;
-    let mut last_found_y: i32 = -60;
+    let scan_x_max = (width as f32 * 0.12) as u32;
+    let scan_y_min = (height as f32 * 0.20) as u32;
+    let scan_y_max = (height as f32 * 0.85) as u32;
+    let mut last_found_y: i32 = -50;
 
     // Pass 1: medium-grey border
     for y in scan_y_min..scan_y_max {
@@ -283,7 +283,7 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
 
     // Pass 2: dark border fallback
     if found.is_empty() {
-        last_found_y = -60;
+        last_found_y = -50;
         for y in scan_y_min..scan_y_max {
             if (y as i32) - last_found_y < 40 { continue; }
             for x in 4..scan_x_max {
@@ -307,7 +307,7 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
     // Pass 3: wider scan
     if found.is_empty() {
         let scan_x_max_wide = (width as f32 * 0.25) as u32;
-        last_found_y = -60;
+        last_found_y = -50;
         for y in scan_y_min..scan_y_max {
             if (y as i32) - last_found_y < 40 { continue; }
             for x in 4..scan_x_max_wide {
