@@ -10,7 +10,6 @@ import "./App.css";
 
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const ANALYZE_URL = "https://agrade-cbwf.onrender.com/analyze";
-const LOCATE_URL = "https://agrade-cbwf.onrender.com/locate";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 const MAX_AUTOMATION_ROUNDS = 30;
@@ -220,6 +219,24 @@ export default function App() {
     }
   };
 
+  const parseAnalyzeJson = (
+    raw: string
+  ): { answer: string; type: "multiple_choice" | "text_input"; confidence: number } | null => {
+    try {
+      const clean = raw.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      if (!parsed?.answer || !parsed?.type) return null;
+      const type = parsed.type === "text_input" ? "text_input" : "multiple_choice";
+      const confidence =
+        typeof parsed.confidence === "number"
+          ? Math.max(0, Math.min(1, parsed.confidence))
+          : 0.6;
+      return { answer: String(parsed.answer), type, confidence };
+    } catch {
+      return null;
+    }
+  };
+
   // ── Analyze screen — returns answer as structured JSON ────────────────────
   const analyzeScreen = async (base64Image: string): Promise<{
     answer: string;
@@ -227,21 +244,46 @@ export default function App() {
     confidence: number;
   } | null> => {
     try {
-      const res = await fetch(ANALYZE_URL, {
+      // Primary path: dedicated /analyze endpoint
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const res = await fetch(ANALYZE_URL, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ base64Image }),
+        });
+        if (!res.ok) {
+          console.error("Analyze failed:", res.status, await res.text());
+          await sleep(250);
+          continue;
+        }
+        const data = await res.json();
+        if (data?.answer && data?.type) {
+          return {
+            answer: String(data.answer),
+            type: data.type === "text_input" ? "text_input" : "multiple_choice",
+            confidence:
+              typeof data.confidence === "number"
+                ? Math.max(0, Math.min(1, data.confidence))
+                : 0.7,
+          };
+        }
+      }
+
+      // Fallback path: ask endpoint with strict JSON instruction
+      const fallbackRes = await fetch(SERVER_URL, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ base64Image }),
+        body: JSON.stringify({
+          base64Image,
+          message:
+            'Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0}.',
+          history: [],
+        }),
       });
-      if (!res.ok) {
-        console.error("Analyze failed:", res.status, await res.text());
-        return null;
-      }
-      const data = await res.json();
-      if (data.error) {
-        console.error("Analyze error:", data.error);
-        return null;
-      }
-      return data;
+      if (!fallbackRes.ok) return null;
+      const fallbackData = await fallbackRes.json();
+      const rawText = String(fallbackData?.result || "");
+      return parseAnalyzeJson(rawText);
     } catch (err) {
       console.error("analyzeScreen exception:", err);
       return null;
@@ -254,14 +296,24 @@ export default function App() {
     text: string
   ): Promise<{ x: number; y: number; found: boolean }> => {
     try {
-      const res = await fetch(LOCATE_URL, {
+      const res = await fetch(SERVER_URL, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ base64Image, text }),
+        body: JSON.stringify({
+          base64Image,
+          message: `Find the text "${text}" on screen and click it. The text is a clickable answer option. Emit ONLY an [ACTION:click:X:Y] tag for the center coordinates. Nothing else.`,
+          history: [],
+        }),
       });
       if (!res.ok) return { x: 0.5, y: 0.5, found: false };
       const data = await res.json();
-      return data;
+      const rawText = String(data?.result || "");
+      const { actions } = parseAutomationActions(rawText);
+      const clickAction = actions.find((a) => a.type === "click");
+      if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
+        return { x: clickAction.x, y: clickAction.y, found: true };
+      }
+      return { x: 0.5, y: 0.5, found: false };
     } catch {
       return { x: 0.5, y: 0.5, found: false };
     }
