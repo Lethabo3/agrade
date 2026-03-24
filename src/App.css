@@ -51,7 +51,7 @@ body { background: transparent; overflow: hidden; border: none !important;
   outline: none !important;
   display: flex;
   flex-direction: column;
-    background: transparent;
+  background: transparent;
   font-family: -apple-system, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', sans-serif;
 }
 
@@ -169,6 +169,45 @@ body { background: transparent; overflow: hidden; border: none !important;
   white-space: pre-wrap;
   padding: 2px 4px;
   animation: hud-fade 0.2s ease;
+}
+
+.hud-ai-automation {
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  padding-left: 8px;
+}
+
+.hud-automation-badge {
+  display: block;
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.35);
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+  font-weight: 400;
+}
+
+.hud-automation-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.70rem;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 2px 4px;
+  animation: hud-fade 0.2s ease;
+}
+
+.hud-automation-spinner {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  animation: hud-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes hud-spin {
+  to { transform: rotate(360deg); }
 }
 
 .hud-limit {
