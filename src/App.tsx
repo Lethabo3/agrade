@@ -56,7 +56,6 @@ const parseAutomationActions = (
   const actions: AutomationAction[] = [];
   const actionRegex = /\[ACTION:([^\]]+)\]/g;
   let match;
-
   while ((match = actionRegex.exec(text)) !== null) {
     const parts = match[1].split(":");
     const type = parts[0] as AutomationAction["type"];
@@ -72,7 +71,6 @@ const parseAutomationActions = (
       actions.push({ type: "screenshot" });
     }
   }
-
   const cleanText = text.replace(actionRegex, "").replace(/\n{3,}/g, "\n\n").trim();
   return { actions, cleanText };
 };
@@ -104,7 +102,6 @@ export default function App() {
   };
 
   const captureQuizScreenshot = async (): Promise<string> => {
-    // Hide overlay before capture so model sees the browser page, not this app.
     await invoke("hide_window").catch(() => {});
     await sleep(180);
     const shot = await invoke<string>("capture_screen");
@@ -114,11 +111,9 @@ export default function App() {
   };
 
   const isSafeClickPoint = (x: number, y: number): boolean => {
-    // Block risky edges/title-bar/taskbar zones to avoid closing windows/apps.
-    if (x < 0.06 || x > 0.94) return false;
-    if (y < 0.12 || y > 0.92) return false;
-    // Extra block for common top-right window controls.
-    if (x > 0.82 && y < 0.16) return false;
+    if (x < 0.04 || x > 0.96) return false;
+    if (y < 0.10 || y > 0.93) return false;
+    if (x > 0.82 && y < 0.06) return false;
     return true;
   };
 
@@ -194,11 +189,7 @@ export default function App() {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 25000);
-
-      const body: Record<string, unknown> = {
-        message: userText || "",
-        history: hist,
-      };
+      const body: Record<string, unknown> = { message: userText || "", history: hist };
       if (base64Image) body.base64Image = base64Image;
 
       const res = await fetch(SERVER_URL, {
@@ -239,98 +230,61 @@ export default function App() {
     }
   };
 
-  const parseAnalyzeJson = (
-    raw: string
-  ): {
+  // ── JSON parser for /analyze responses ────────────────────────────────────
+  const parseAnalyzeJson = (raw: string): {
     answer: string;
     type: "multiple_choice" | "text_input";
     confidence: number;
     option_index: number | null;
   } | null => {
-    const normalize = (
-      value: unknown
-    ): {
-      answer: string;
-      type: "multiple_choice" | "text_input";
-      confidence: number;
-      option_index: number | null;
-    } | null => {
+    const normalize = (value: unknown) => {
       if (!value || typeof value !== "object") return null;
-      const record = value as Record<string, unknown>;
-      if (!record.answer || !record.type) return null;
-      const type = record.type === "text_input" ? "text_input" : "multiple_choice";
-      const confidence =
-        typeof record.confidence === "number"
-          ? Math.max(0, Math.min(1, record.confidence))
-          : 0.6;
-      const optionIndex =
-        typeof record.option_index === "number" && [1, 2, 3, 4].includes(record.option_index)
-          ? record.option_index
-          : null;
-      return { answer: String(record.answer), type, confidence, option_index: optionIndex };
+      const r = value as Record<string, unknown>;
+      if (!r.answer || !r.type) return null;
+      return {
+        answer: String(r.answer),
+        type: r.type === "text_input" ? "text_input" as const : "multiple_choice" as const,
+        confidence: typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6,
+        option_index: typeof r.option_index === "number" && [1,2,3,4].includes(r.option_index)
+          ? r.option_index : null,
+      };
     };
 
-    const extractFirstJsonChunk = (text: string): string | null => {
+    const extractJson = (text: string): string | null => {
       const start = text.search(/[\[{]/);
       if (start < 0) return null;
-      let depth = 0;
-      let inString = false;
-      let escaped = false;
-      const openChar = text[start];
-      const closeChar = openChar === "[" ? "]" : "}";
-
+      let depth = 0, inString = false, escaped = false;
+      const open = text[start], close = open === "[" ? "]" : "}";
       for (let i = start; i < text.length; i++) {
         const ch = text[i];
         if (inString) {
-          if (escaped) {
-            escaped = false;
-          } else if (ch === "\\") {
-            escaped = true;
-          } else if (ch === "\"") {
-            inString = false;
-          }
+          if (escaped) escaped = false;
+          else if (ch === "\\") escaped = true;
+          else if (ch === '"') inString = false;
           continue;
         }
-
-        if (ch === "\"") {
-          inString = true;
-          continue;
-        }
-
-        if (ch === openChar) depth++;
-        if (ch === closeChar) {
-          depth--;
-          if (depth === 0) {
-            return text.slice(start, i + 1);
-          }
-        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === open) depth++;
+        if (ch === close && --depth === 0) return text.slice(start, i + 1);
       }
       return null;
     };
 
+    const clean = raw.replace(/```json|```/g, "").trim();
     try {
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const direct = JSON.parse(clean);
-      if (Array.isArray(direct)) return normalize(direct[0]);
-      return normalize(direct);
+      const d = JSON.parse(clean);
+      return normalize(Array.isArray(d) ? d[0] : d);
     } catch {}
-
     try {
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const chunk = extractFirstJsonChunk(clean);
+      const chunk = extractJson(clean);
       if (!chunk) return null;
-      const parsed = JSON.parse(chunk);
-      if (Array.isArray(parsed)) return normalize(parsed[0]);
-      return normalize(parsed);
-    } catch {
-      return null;
-    }
+      const d = JSON.parse(chunk);
+      return normalize(Array.isArray(d) ? d[0] : d);
+    } catch { return null; }
   };
 
-  // ── Analyze screen — returns answer as structured JSON ────────────────────
-  const analyzeScreen = async (
-    base64Image: string
-  ): Promise<{
+  // ── Analyze screen ─────────────────────────────────────────────────────────
+  const analyzeScreen = async (base64Image: string): Promise<{
     analysis: {
       answer: string;
       type: "multiple_choice" | "text_input";
@@ -340,129 +294,57 @@ export default function App() {
     reason?: string;
   }> => {
     try {
-      if (!base64Image || base64Image.length < 100) {
-        return { analysis: null, reason: "Screenshot appears empty or too small." };
-      }
+      if (!base64Image || base64Image.length < 100)
+        return { analysis: null, reason: "Screenshot empty." };
 
-      // Primary path: dedicated /analyze endpoint
+      // Primary: /analyze endpoint
       for (let attempt = 1; attempt <= 2; attempt++) {
         const res = await fetch(ANALYZE_URL, {
           method: "POST",
           headers: authHeaders(),
           body: JSON.stringify({ base64Image }),
         });
-        if (!res.ok) {
-          const detail = (await res.text()).slice(0, 180);
-          const reason =
-            res.status === 401
-              ? "Unauthorized (401) - sign in again."
-              : res.status === 429
-                ? "Rate limit reached (429)."
-                : `Analyze endpoint error (${res.status})${detail ? `: ${detail}` : ""}`;
-          console.error("Analyze failed:", reason);
-          if (attempt === 2) {
-            // continue to fallback path after final primary attempt
-          }
-          await sleep(250);
-          continue;
-        }
+        if (!res.ok) { await sleep(300); continue; }
         const data = await res.json();
         if (data?.answer && data?.type) {
           return {
             analysis: {
               answer: String(data.answer),
               type: data.type === "text_input" ? "text_input" : "multiple_choice",
-              confidence:
-                typeof data.confidence === "number"
-                  ? Math.max(0, Math.min(1, data.confidence))
-                  : 0.7,
-              option_index:
-                typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
-                  ? data.option_index
-                  : null,
+              confidence: typeof data.confidence === "number"
+                ? Math.max(0, Math.min(1, data.confidence)) : 0.7,
+              option_index: typeof data.option_index === "number" && [1,2,3,4].includes(data.option_index)
+                ? data.option_index : null,
             },
           };
         }
+        await sleep(300);
       }
 
-      // Fallback path: ask endpoint with strict JSON instruction
+      // Fallback: /ask with strict JSON prompt
       const fallbackRes = await fetch(SERVER_URL, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
           base64Image,
-          message:
-            'You are analyzing a browser quiz screenshot. Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0,"option_index":1-4 or null}. If a quiz question/options are not clearly visible, return {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}.',
+          message: 'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=first option, 2=second, etc. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
           history: [],
         }),
       });
-      if (!fallbackRes.ok) {
-        const detail = (await fallbackRes.text()).slice(0, 180);
-        return {
-          analysis: null,
-          reason:
-            fallbackRes.status === 401
-              ? "Unauthorized (401) on fallback."
-              : fallbackRes.status === 429
-                ? "Rate limit reached (429) on fallback."
-                : `Fallback endpoint error (${fallbackRes.status})${detail ? `: ${detail}` : ""}`,
-        };
-      }
+
+      if (!fallbackRes.ok)
+        return { analysis: null, reason: `Fallback error ${fallbackRes.status}` };
+
       const fallbackData = await fallbackRes.json();
-      const rawText = String(fallbackData?.result || "");
-      const parsed = parseAnalyzeJson(rawText);
+      const parsed = parseAnalyzeJson(String(fallbackData?.result || ""));
       if (parsed) return { analysis: parsed };
-      return {
-        analysis: null,
-        reason: `Fallback returned non-JSON/invalid JSON. Raw: ${rawText.slice(0, 160)}`,
-      };
+      return { analysis: null, reason: "Could not parse response." };
     } catch (err) {
-      console.error("analyzeScreen exception:", err);
-      return {
-        analysis: null,
-        reason: err instanceof Error ? err.message : "Unknown analyze exception",
-      };
+      return { analysis: null, reason: err instanceof Error ? err.message : "Unknown error" };
     }
   };
 
-  // ── Locate text on screen — returns normalized coordinates ────────────────
-  const locateOnScreen = async (
-    base64Image: string,
-    text: string
-  ): Promise<{ x: number; y: number; found: boolean }> => {
-    try {
-      const isLongOption = text.length > 30;
-      const searchInstruction = isLongOption
-        ? `A Coursera quiz is visible. Find the radio button (○ circle) next to the option that says "${text.slice(0, 60)}". Click the radio button circle itself, not the text. Emit ONLY one [ACTION:click:X:Y] tag for the radio button center.`
-        : `Find the clickable answer option "${text}" on screen and click its center. Emit ONLY one [ACTION:click:X:Y] tag.`;
-
-      const res = await fetch(SERVER_URL, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({
-          base64Image,
-          message: searchInstruction,
-          history: [],
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const { actions } = parseAutomationActions(String(data?.result || ""));
-        const clickAction = actions.find((a) => a.type === "click");
-        if (clickAction?.x !== undefined && clickAction?.y !== undefined) {
-          if (isSafeClickPoint(clickAction.x, clickAction.y)) {
-            return { x: clickAction.x, y: clickAction.y, found: true };
-          }
-        }
-      }
-
-      return { x: 0.5, y: 0.5, found: false };
-    } catch {
-      return { x: 0.5, y: 0.5, found: false };
-    }
-  };
-
+  // ── Click option by pixel scanning ────────────────────────────────────────
   const clickOptionByIndex = async (
     base64Image: string,
     optionIndex: number
@@ -473,32 +355,31 @@ export default function App() {
         { base64Image, maxOptions: 8 }
       );
 
-      console.log("Found option positions:", positions);
+      console.log(`Pixel scan found ${positions.length} buttons:`,
+        positions.map(p => `(${Math.round(p[0]*100)}%,${Math.round(p[1]*100)}%)`).join(" ")
+      );
 
-      if (positions.length === 0) {
-        console.warn("No radio buttons found via pixel scan");
+      // Show debug info in chat during testing
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: `Detected ${positions.length} option button(s): ${positions.map(p => `(${Math.round(p[0]*100)}%,${Math.round(p[1]*100)}%)`).join(" ")} — targeting #${optionIndex}`,
+        isAutomation: true,
+      }]);
+
+      if (positions.length === 0) return false;
+
+      const idx = Math.min(optionIndex - 1, positions.length - 1);
+      const target = positions[idx];
+      if (!target) return false;
+
+      if (!isSafeClickPoint(target[0], target[1])) {
+        console.warn("Blocked unsafe click at", target);
         return false;
       }
 
-      const target = positions[optionIndex - 1];
-      if (!target) {
-        console.warn(
-          `Option ${optionIndex} not found, only ${positions.length} options detected`
-        );
-        const fallback = positions[positions.length - 1];
-        if (!fallback || !isSafeClickPoint(fallback[0], fallback[1])) return false;
-        await invoke("hide_window").catch(() => {});
-        await sleep(150);
-        await invoke("click_at", { x: fallback[0], y: fallback[1] });
-        await sleep(800);
-        await invoke("show_window").catch(() => {});
-        return true;
-      }
-
-      if (!isSafeClickPoint(target[0], target[1])) return false;
       await invoke("hide_window").catch(() => {});
       await sleep(150);
-      setAutomationStatus(`Clicking option ${optionIndex}...`);
+      setAutomationStatus(`Clicking option ${optionIndex} at (${Math.round(target[0]*100)}%, ${Math.round(target[1]*100)}%)…`);
       await invoke("click_at", { x: target[0], y: target[1] });
       await sleep(800);
       await invoke("show_window").catch(() => {});
@@ -509,18 +390,15 @@ export default function App() {
     }
   };
 
-  // ── Execute actions ────────────────────────────────────────────────────────
-  const executeActions = async (actions: AutomationAction[]): Promise<string> => {
+  // ── Execute manual action tags (from /ask responses) ──────────────────────
+  const executeActions = async (actions: AutomationAction[]): Promise<void> => {
     await invoke("hide_window").catch(() => {});
     await sleep(150);
 
     for (const action of actions) {
       try {
         if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
-          if (!isSafeClickPoint(action.x, action.y)) {
-            console.warn("Blocked unsafe click:", action);
-            continue;
-          }
+          if (!isSafeClickPoint(action.x, action.y)) continue;
           setAutomationStatus(`Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`);
           await invoke("click_at", { x: action.x, y: action.y });
           await sleep(120);
@@ -536,100 +414,72 @@ export default function App() {
       }
     }
 
-    await sleep(600);
-    const screenshot = await invoke<string>("capture_screen");
+    await sleep(400);
     await invoke("show_window").catch(() => {});
-    return screenshot;
   };
 
-  // ── Auto-answer loop using analyze + locate ───────────────────────────────
+  // ── Auto-answer loop ───────────────────────────────────────────────────────
   const handleAutoAnswer = async () => {
     if (isLoading || isAutomating) return;
     stopAutomationRef.current = false;
     setIsAutomating(true);
 
-    setMessages((prev) => [...prev, {
-      role: "user",
-      text: "Auto-answering quiz…",
-    }]);
+    setMessages(prev => [...prev, { role: "user", text: "Auto-answering quiz…" }]);
 
     let round = 0;
     let consecutiveFailures = 0;
-    let lastAnalyzeReason = "";
+    let lastReason = "";
 
-    while (
-      round < MAX_AUTOMATION_ROUNDS &&
-      consecutiveFailures < 3 &&
-      !stopAutomationRef.current
-    ) {
+    while (round < MAX_AUTOMATION_ROUNDS && consecutiveFailures < 3 && !stopAutomationRef.current) {
       round++;
       setAutomationStatus(`Round ${round} — analyzing…`);
       setTimeout(scrollToBottom, 50);
 
       const screenBase64 = await captureQuizScreenshot();
-      const analyzeResult = await analyzeScreen(screenBase64);
-      const analysis = analyzeResult.analysis;
+      const { analysis, reason } = await analyzeScreen(screenBase64);
+
       if (stopAutomationRef.current) break;
 
       if (!analysis) {
         consecutiveFailures++;
-        lastAnalyzeReason = analyzeResult.reason || "Unknown analyze failure";
-        setAutomationStatus(
-          `Round ${round} — analyze failed (${lastAnalyzeReason.slice(0, 70)}), retrying...`
-        );
-        if (consecutiveFailures === 1) {
-          setMessages((prev) => [...prev, {
-            role: "ai",
-            text: `Analyze failed: ${lastAnalyzeReason}`,
-            isAutomation: true,
-          }]);
-        }
+        lastReason = reason || "Unknown failure";
+        setMessages(prev => [...prev, {
+          role: "ai",
+          text: `Round ${round}: Analyze failed — ${lastReason}`,
+          isAutomation: true,
+        }]);
         await sleep(1000);
         continue;
       }
 
       if (!analysis.answer || analysis.confidence < 0.35) {
-        setMessages((prev) => [...prev, {
+        setMessages(prev => [...prev, {
           role: "ai",
-          text: "Quiz question was not clearly detected on screen. Stopping automation.",
+          text: "No quiz question detected on screen. Stopping.",
           isAutomation: true,
         }]);
         break;
       }
 
       consecutiveFailures = 0;
-      console.log("Analysis:", analysis);
 
-      // Show the answer in chat
-      setMessages((prev) => [...prev, {
+      // Show answer in chat
+      setMessages(prev => [...prev, {
         role: "ai",
-        text: analysis.answer,
+        text: `Answer: ${analysis.answer}${analysis.option_index ? ` (option ${analysis.option_index})` : ""}`,
         isAutomation: true,
       }]);
 
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
-        setAutomationStatus(`Clicking option ${idx}...`);
-        let clicked = await clickOptionByIndex(screenBase64, idx);
+        setAutomationStatus(`Locating option ${idx}…`);
+
+        const clicked = await clickOptionByIndex(screenBase64, idx);
 
         if (!clicked) {
-          setAutomationStatus("Locating by text...");
-          const location = await locateOnScreen(screenBase64, analysis.answer);
-          if (location.found) {
-            await invoke("hide_window").catch(() => {});
-            await sleep(150);
-            setAutomationStatus("Clicking option...");
-            await invoke("click_at", { x: location.x, y: location.y });
-            await sleep(800);
-            await invoke("show_window").catch(() => {});
-            clicked = true;
-          }
-        }
-
-        if (!clicked) {
-          setMessages((prev) => [...prev, {
+          setMessages(prev => [...prev, {
             role: "ai",
-            text: "Could not locate option on screen.",
+            text: `Could not find option ${idx} via pixel scan. Skipping.`,
             isAutomation: true,
           }]);
           consecutiveFailures++;
@@ -641,7 +491,6 @@ export default function App() {
         await invoke("hide_window").catch(() => {});
         await sleep(150);
         setAutomationStatus(`Typing "${analysis.answer}"…`);
-        // Click center of screen to focus input
         await invoke("click_at", { x: 0.5, y: 0.55 });
         await sleep(200);
         await invoke("type_text", { text: analysis.answer });
@@ -650,14 +499,14 @@ export default function App() {
         await sleep(800);
         await invoke("show_window").catch(() => {});
       }
+
       if (stopAutomationRef.current) break;
 
-      // Check if done
-      setAutomationStatus(`Round ${round} — checking if complete…`);
+      // Completion check
+      setAutomationStatus(`Round ${round} — checking progress…`);
       const afterScreen = await captureQuizScreenshot();
-
       const checkResult = await fetchFromServer(
-        "[AUTO] Is this quiz or task now fully complete with no more unanswered questions? Reply YES or NO only.",
+        "[AUTO] Is this quiz fully complete with no more unanswered questions visible? Reply YES or NO only.",
         afterScreen,
         []
       );
@@ -666,35 +515,27 @@ export default function App() {
       console.log("Completion check:", checkText);
 
       if (checkText.startsWith("YES")) {
-        setMessages((prev) => [...prev, {
-          role: "ai",
-          text: "✓ Task complete.",
-          isAutomation: true,
+        setMessages(prev => [...prev, {
+          role: "ai", text: "✓ Task complete.", isAutomation: true,
         }]);
         break;
       }
 
-      // Small pause before next round
       await sleep(300);
       setTimeout(scrollToBottom, 50);
     }
 
+    // End messages
     if (stopAutomationRef.current) {
-      setMessages((prev) => [...prev, {
-        role: "ai",
-        text: "Automation stopped.",
-        isAutomation: true,
-      }]);
+      setMessages(prev => [...prev, { role: "ai", text: "Automation stopped.", isAutomation: true }]);
     } else if (consecutiveFailures >= 3) {
-      setMessages((prev) => [...prev, {
+      setMessages(prev => [...prev, {
         role: "ai",
-        text: `Could not analyze screen after multiple attempts. Last error: ${lastAnalyzeReason || "Unknown failure"}`,
+        text: `Stopped after 3 consecutive failures. Last error: ${lastReason}`,
         isAutomation: true,
       }]);
-    }
-
-    if (!stopAutomationRef.current && round >= MAX_AUTOMATION_ROUNDS) {
-      setMessages((prev) => [...prev, {
+    } else if (round >= MAX_AUTOMATION_ROUNDS) {
+      setMessages(prev => [...prev, {
         role: "ai",
         text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`,
         isAutomation: true,
@@ -710,7 +551,7 @@ export default function App() {
   const handleStopAutomation = () => {
     if (!isAutomating) return;
     stopAutomationRef.current = true;
-    setAutomationStatus("Stopping automation...");
+    setAutomationStatus("Stopping…");
   };
 
   // ── Normal send ────────────────────────────────────────────────────────────
@@ -725,7 +566,6 @@ export default function App() {
 
     const result = await fetchFromServer(userText, base64Image, hist);
     setIsLoading(false);
-
     if (!result) return;
 
     const { rawText, newHistory } = result;
@@ -733,16 +573,8 @@ export default function App() {
     const aiText = stripMarkdown(cleanText);
     const hasActions = actions.length > 0;
 
-    setMessages((prev) => [...prev, {
-      role: "ai",
-      text: aiText,
-      isAutomation: hasActions,
-    }]);
-
-    const finalHistory: HistoryEntry[] = [
-      ...newHistory,
-      { role: "assistant", content: aiText },
-    ];
+    setMessages(prev => [...prev, { role: "ai", text: aiText, isAutomation: hasActions }]);
+    const finalHistory: HistoryEntry[] = [...newHistory, { role: "assistant", content: aiText }];
     setHistory(finalHistory);
     setTimeout(scrollToBottom, 50);
 
@@ -755,14 +587,11 @@ export default function App() {
   };
 
   const handleSubmit = async () => {
-    if (isAutomating) {
-      handleStopAutomation();
-      return;
-    }
+    if (isAutomating) { handleStopAutomation(); return; }
     if (!message.trim() || isLoading) return;
     const userText = message.trim();
     setMessage("");
-    setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    setMessages(prev => [...prev, { role: "user", text: userText }]);
     await sendToServer(userText);
   };
 
@@ -771,10 +600,8 @@ export default function App() {
     const userText = message.trim();
     const screenBase64 = await invoke<string>("capture_screen");
     setMessage("");
-    setMessages((prev) => [...prev, {
-      role: "user",
-      text: userText || "",
-      screenshotOnly: !userText,
+    setMessages(prev => [...prev, {
+      role: "user", text: userText || "", screenshotOnly: !userText,
     }]);
     await sendToServer(userText, screenBase64);
   };
@@ -782,10 +609,8 @@ export default function App() {
   const handleAskGroq = useCallback(
     async (base64Image: string, userMessage?: string) => {
       const userText = userMessage?.trim() || "";
-      setMessages((prev) => [...prev, {
-        role: "user",
-        text: userText || "",
-        screenshotOnly: !userText,
+      setMessages(prev => [...prev, {
+        role: "user", text: userText || "", screenshotOnly: !userText,
       }]);
       await sendToServer(userText, base64Image, history);
     },
@@ -793,20 +618,14 @@ export default function App() {
   );
 
   useEffect(() => {
-    const shortcuts: string[] = [
-      "CommandOrControl+Shift+G",
-      "CommandOrControl+B",
-      "Control+H",
-      "Control+Left",
-      "Control+Right",
-      "Control+Up",
-      "Control+Down",
+    const shortcuts = [
+      "CommandOrControl+Shift+G", "CommandOrControl+B", "Control+H",
+      "Control+Left", "Control+Right", "Control+Up", "Control+Down",
     ];
 
     const setupShortcuts = async () => {
-      for (const s of shortcuts) {
-        try { await unregister(s); } catch (_) {}
-      }
+      for (const s of shortcuts) { try { await unregister(s); } catch (_) {} }
+
       await register("CommandOrControl+Shift+G", async () => {
         const screenBase64 = await invoke<string>("capture_screen");
         handleAskGroq(screenBase64, message);
@@ -816,52 +635,41 @@ export default function App() {
         await invoke("show_window");
         await getCurrentWindow().setFocus();
       });
-      await register("Control+H", async () => {
-        await invoke("hide_window");
-      });
+      await register("Control+H", async () => { await invoke("hide_window"); });
+
       const STEP = 40;
       await register("Control+Left", async () => {
-        const win = getCurrentWindow();
-        const pos = await win.outerPosition();
+        const win = getCurrentWindow(); const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x - STEP, y: pos.y } as any);
       });
       await register("Control+Right", async () => {
-        const win = getCurrentWindow();
-        const pos = await win.outerPosition();
+        const win = getCurrentWindow(); const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x + STEP, y: pos.y } as any);
       });
       await register("Control+Up", async () => {
-        const win = getCurrentWindow();
-        const pos = await win.outerPosition();
+        const win = getCurrentWindow(); const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x, y: pos.y - STEP } as any);
       });
       await register("Control+Down", async () => {
-        const win = getCurrentWindow();
-        const pos = await win.outerPosition();
+        const win = getCurrentWindow(); const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x, y: pos.y + STEP } as any);
       });
     };
 
     setupShortcuts();
-    return () => { shortcuts.forEach((s) => unregister(s)); };
+    return () => { shortcuts.forEach(s => unregister(s)); };
   }, [handleAskGroq, message]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
   };
 
   const copyLastResponse = () => {
-    const lastAi = [...messages].reverse().find((m) => m.role === "ai" && !m.isLimit);
+    const lastAi = [...messages].reverse().find(m => m.role === "ai" && !m.isLimit);
     if (lastAi) navigator.clipboard.writeText(lastAi.text);
   };
 
-  const clearConversation = () => {
-    setMessages([]);
-    setHistory([]);
-  };
+  const clearConversation = () => { setMessages([]); setHistory([]); };
 
   const isLimitReached = messages.length > 0 && messages[messages.length - 1].isLimit;
   const isBlocked = isLoading || isAutomating;
@@ -923,9 +731,7 @@ export default function App() {
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
                   <p className="hud-limit-text">You've used your 5 free messages</p>
-                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>
-                    Upgrade to Pro
-                  </button>
+                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>Upgrade to Pro</button>
                 </div>
               ) : (
                 <div key={i} className={`hud-ai-response${msg.isAutomation ? " hud-ai-automation" : ""}`}>
@@ -934,13 +740,7 @@ export default function App() {
                 </div>
               )
             )}
-
-            {isLoading && (
-              <div className="hud-thinking">
-                <span /><span /><span />
-              </div>
-            )}
-
+            {isLoading && <div className="hud-thinking"><span /><span /><span /></div>}
             {isAutomating && (
               <div className="hud-automation-status">
                 <span className="hud-automation-spinner" />
@@ -954,41 +754,22 @@ export default function App() {
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
-
-              {/* Screenshot button */}
-              <button
-                className="hud-icon-btn"
-                onClick={handleCaptureWithMessage}
-                disabled={isBlocked}
-                title="Capture screen"
-              >
+              <button className="hud-icon-btn" onClick={handleCaptureWithMessage} disabled={isBlocked} title="Capture screen">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
-
-              {/* Auto-answer button */}
-              <button
-                className="hud-icon-btn"
-                onClick={handleAutoAnswer}
-                disabled={isBlocked}
-                title="Auto-answer quiz"
-              >
+              <button className="hud-icon-btn" onClick={handleAutoAnswer} disabled={isBlocked} title="Auto-answer quiz">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                 </svg>
               </button>
-
               <div className="hud-input-row">
                 <textarea
                   ref={inputRef}
                   className="hud-input"
-                  placeholder={
-                    isAutomating
-                      ? automationStatus || "Automating…"
-                      : "Ask anything or capture screen…"
-                  }
+                  placeholder={isAutomating ? automationStatus || "Automating…" : "Ask anything or capture screen…"}
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
