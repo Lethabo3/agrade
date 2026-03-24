@@ -14,6 +14,8 @@ const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 const MAX_AUTOMATION_ROUNDS = 30;
 const MIN_OPTION_Y_GAP = 0.04;
+// How many times the same answer text must repeat before we scroll the page
+const SAME_ANSWER_SCROLL_THRESHOLD = 2;
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -115,14 +117,6 @@ export default function App() {
     if (y < 0.15 || y > 0.93) return false;
     if (x > 0.82 && y < 0.06) return false;
     return true;
-  };
-
-  const scrollPageDown = async () => {
-    await invoke("hide_window").catch(() => {});
-    await sleep(150);
-    await invoke("scroll_down", { amount: 3 });
-    await sleep(600);
-    await invoke("show_window").catch(() => {});
   };
 
   const handleDeepLink = (url: string) => {
@@ -284,10 +278,7 @@ export default function App() {
           else if (ch === '"') inString = false;
           continue;
         }
-        if (ch === '"') {
-          inString = true;
-          continue;
-        }
+        if (ch === '"') { inString = true; continue; }
         if (ch === open) depth++;
         if (ch === close && --depth === 0) return text.slice(start, i + 1);
       }
@@ -331,10 +322,7 @@ export default function App() {
           headers: authHeaders(),
           body: JSON.stringify({ base64Image }),
         });
-        if (!res.ok) {
-          await sleep(300);
-          continue;
-        }
+        if (!res.ok) { await sleep(300); continue; }
         const data = await res.json();
         if (data?.answer && data?.type) {
           return {
@@ -346,8 +334,7 @@ export default function App() {
                   ? Math.max(0, Math.min(1, data.confidence))
                   : 0.7,
               option_index:
-                typeof data.option_index === "number" &&
-                [1, 2, 3, 4].includes(data.option_index)
+                typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
                   ? data.option_index
                   : null,
             },
@@ -390,7 +377,7 @@ export default function App() {
         maxOptions: 4,
       });
 
-      // Filter out positions that are clustered too tightly on the y-axis
+      // Remove positions clustered too tightly on the y-axis (likely mis-detections)
       const positions = rawPositions.filter((pos, i) =>
         i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
       );
@@ -420,8 +407,8 @@ export default function App() {
       await invoke("hide_window").catch(() => {});
       await sleep(150);
       setAutomationStatus(`Clicking option ${optionIndex}...`);
-      // Increased x offset to land in the center of the option, with slight y nudge
-      await invoke("click_at", { x: target[0] + 0.045, y: target[1] + 0.005 });
+      // Click the detected center directly — circle detection already gives us the true center
+      await invoke("click_at", { x: target[0], y: target[1] });
       await sleep(1200);
       await invoke("show_window").catch(() => {});
       return true;
@@ -468,6 +455,10 @@ export default function App() {
     let consecutiveFailures = 0;
     let lastReason = "";
 
+    // Track repeated answers to detect a stuck page — only scroll then
+    let lastAnswerText = "";
+    let sameAnswerCount = 0;
+
     while (
       round < MAX_AUTOMATION_ROUNDS &&
       consecutiveFailures < 3 &&
@@ -487,11 +478,7 @@ export default function App() {
         lastReason = reason || "Unknown failure";
         setMessages((prev) => [
           ...prev,
-          {
-            role: "ai",
-            text: `Round ${round}: Analyze failed - ${lastReason}`,
-            isAutomation: true,
-          },
+          { role: "ai", text: `Round ${round}: Analyze failed - ${lastReason}`, isAutomation: true },
         ]);
         await sleep(1000);
         continue;
@@ -500,16 +487,39 @@ export default function App() {
       if (!analysis.answer || analysis.confidence < 0.35) {
         setMessages((prev) => [
           ...prev,
-          {
-            role: "ai",
-            text: "No quiz question detected. Stopping.",
-            isAutomation: true,
-          },
+          { role: "ai", text: "No quiz question detected. Stopping.", isAutomation: true },
         ]);
         break;
       }
 
       consecutiveFailures = 0;
+
+      // Detect a stuck page: same answer seen too many times means clicks aren't registering
+      if (analysis.answer === lastAnswerText) {
+        sameAnswerCount++;
+        if (sameAnswerCount >= SAME_ANSWER_SCROLL_THRESHOLD) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "ai",
+              text: `Same question seen ${sameAnswerCount} times — scrolling page to recover.`,
+              isAutomation: true,
+            },
+          ]);
+          setAutomationStatus("Scrolling stuck page...");
+          await invoke("hide_window").catch(() => {});
+          await sleep(150);
+          await invoke("scroll_down", { amount: 3 });
+          await sleep(700);
+          await invoke("show_window").catch(() => {});
+          sameAnswerCount = 0;
+          await sleep(400);
+          continue;
+        }
+      } else {
+        lastAnswerText = analysis.answer;
+        sameAnswerCount = 1;
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -529,19 +539,14 @@ export default function App() {
         if (!clicked) {
           setMessages((prev) => [
             ...prev,
-            {
-              role: "ai",
-              text: `Could not find option ${idx}. Scrolling and retrying...`,
-              isAutomation: true,
-            },
+            { role: "ai", text: `Could not detect option ${idx}. Retrying next round.`, isAutomation: true },
           ]);
-          setAutomationStatus("Scrolling to find options...");
-          await scrollPageDown();
           consecutiveFailures++;
           await sleep(500);
           continue;
         }
       } else {
+        // Text input answer
         await invoke("hide_window").catch(() => {});
         await sleep(150);
         setAutomationStatus("Typing answer...");
@@ -556,47 +561,14 @@ export default function App() {
 
       if (stopAutomationRef.current) break;
 
-      setAutomationStatus(`Round ${round} - checking progress...`);
-      const afterScreen = await captureQuizScreenshot();
-
-      const progressRes = await fetchFromServer(
-        "[AUTO] Look at this screen. Is there a radio button or checkbox that appears selected or filled in? Reply YES_SELECTED if an answer appears to be selected, NO_SELECTION if nothing is selected, NEXT_BUTTON if there is a Next or Continue button visible, QUIZ_COMPLETE if the quiz is finished.",
-        afterScreen,
-        []
-      );
-
-      const progressText = (progressRes?.rawText || "").trim().toUpperCase();
-      console.log("Progress check:", progressText);
-
-      if (progressText.includes("QUIZ_COMPLETE")) {
-        setMessages((prev) => [
-          ...prev,
-          { role: "ai", text: "Task complete.", isAutomation: true },
-        ]);
-        break;
-      }
-
-      if (progressText.includes("NEXT_BUTTON") || progressText.includes("YES_SELECTED")) {
-        await invoke("hide_window").catch(() => {});
-        await sleep(150);
-        await invoke("click_at", { x: 0.85, y: 0.88 });
-        await sleep(1200);
-        await invoke("show_window").catch(() => {});
-        setAutomationStatus("Moving to next question...");
-        await sleep(600);
-      } else if (progressText.includes("NO_SELECTION")) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: `Round ${round}: Click did not register. Scrolling and retrying...`,
-            isAutomation: true,
-          },
-        ]);
-        setAutomationStatus("Scrolling to retry...");
-        await scrollPageDown();
-        consecutiveFailures++;
-      }
+      // After every successful answer attempt, advance to the next question blindly.
+      // The next round's analyzeScreen will confirm whether the page moved forward.
+      setAutomationStatus("Advancing to next question...");
+      await invoke("hide_window").catch(() => {});
+      await sleep(800);
+      await invoke("click_at", { x: 0.85, y: 0.88 });
+      await sleep(1000);
+      await invoke("show_window").catch(() => {});
 
       await sleep(300);
       setTimeout(scrollToBottom, 50);
@@ -619,11 +591,7 @@ export default function App() {
     } else if (round >= MAX_AUTOMATION_ROUNDS) {
       setMessages((prev) => [
         ...prev,
-        {
-          role: "ai",
-          text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`,
-          isAutomation: true,
-        },
+        { role: "ai", text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`, isAutomation: true },
       ]);
     }
 
@@ -671,10 +639,7 @@ export default function App() {
   };
 
   const handleSubmit = async () => {
-    if (isAutomating) {
-      handleStopAutomation();
-      return;
-    }
+    if (isAutomating) { handleStopAutomation(); return; }
     if (!message.trim() || isLoading) return;
     const userText = message.trim();
     setMessage("");
@@ -689,11 +654,7 @@ export default function App() {
     setMessage("");
     setMessages((prev) => [
       ...prev,
-      {
-        role: "user",
-        text: userText || "",
-        screenshotOnly: !userText,
-      },
+      { role: "user", text: userText || "", screenshotOnly: !userText },
     ]);
     await sendToServer(userText, screenBase64);
   };
@@ -703,11 +664,7 @@ export default function App() {
       const userText = userMessage?.trim() || "";
       setMessages((prev) => [
         ...prev,
-        {
-          role: "user",
-          text: userText || "",
-          screenshotOnly: !userText,
-        },
+        { role: "user", text: userText || "", screenshotOnly: !userText },
       ]);
       await sendToServer(userText, base64Image, history);
     },
@@ -727,9 +684,7 @@ export default function App() {
 
     const setupShortcuts = async () => {
       for (const s of shortcuts) {
-        try {
-          await unregister(s);
-        } catch (_) {}
+        try { await unregister(s); } catch (_) {}
       }
       await register("CommandOrControl+Shift+G", async () => {
         const screenBase64 = await invoke<string>("capture_screen");
@@ -740,9 +695,7 @@ export default function App() {
         await invoke("show_window");
         await getCurrentWindow().setFocus();
       });
-      await register("Control+H", async () => {
-        await invoke("hide_window");
-      });
+      await register("Control+H", async () => { await invoke("hide_window"); });
       const STEP = 40;
       await register("Control+Left", async () => {
         const win = getCurrentWindow();
@@ -767,16 +720,11 @@ export default function App() {
     };
 
     setupShortcuts();
-    return () => {
-      shortcuts.forEach((s) => unregister(s));
-    };
+    return () => { shortcuts.forEach((s) => unregister(s)); };
   }, [handleAskGroq, message]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
   };
 
   const copyLastResponse = () => {
@@ -784,10 +732,7 @@ export default function App() {
     if (lastAi) navigator.clipboard.writeText(lastAi.text);
   };
 
-  const clearConversation = () => {
-    setMessages([]);
-    setHistory([]);
-  };
+  const clearConversation = () => { setMessages([]); setHistory([]); };
 
   const isLimitReached = messages.length > 0 && messages[messages.length - 1].isLimit;
   const isBlocked = isLoading || isAutomating;
@@ -796,65 +741,27 @@ export default function App() {
     <div className="hud-root">
       <div className="hud-panel">
         <div className="hud-header" data-tauri-drag-region>
-          <span className="hud-title" data-tauri-drag-region>
-            agrade
-          </span>
+          <span className="hud-title" data-tauri-drag-region>agrade</span>
           <div className="hud-header-actions">
             {messages.length > 0 && !isLimitReached && (
               <>
-                <button
-                  className="hud-action-btn"
-                  onClick={copyLastResponse}
-                  title="Copy last response"
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
+                <button className="hud-action-btn" onClick={copyLastResponse} title="Copy last response">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="9" y="9" width="13" height="13" rx="2" />
                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                   </svg>
                 </button>
-                <button
-                  className="hud-action-btn"
-                  onClick={clearConversation}
-                  title="Clear conversation"
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
+                <button className="hud-action-btn" onClick={clearConversation} title="Clear conversation">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="3 6 5 6 21 6" />
                     <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                    <path d="M10 11v6" />
-                    <path d="M14 11v6" />
+                    <path d="M10 11v6" /><path d="M14 11v6" />
                   </svg>
                 </button>
               </>
             )}
             <button className="hud-action-btn" onClick={handleSignOut} title="Sign out">
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                 <polyline points="16 17 21 12 16 7" />
                 <line x1="21" y1="12" x2="9" y2="12" />
@@ -872,16 +779,7 @@ export default function App() {
                   <div className="hud-bubble user">
                     {msg.screenshotOnly ? (
                       <div className="hud-screenshot-tag">
-                        <svg
-                          width="11"
-                          height="11"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                           <circle cx="12" cy="13" r="4" />
                         </svg>
@@ -895,9 +793,7 @@ export default function App() {
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
                   <p className="hud-limit-text">You've used your 5 free messages</p>
-                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>
-                    Upgrade to Pro
-                  </button>
+                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>Upgrade to Pro</button>
                 </div>
               ) : (
                 <div key={i} className={`hud-ai-response${msg.isAutomation ? " hud-ai-automation" : ""}`}>
@@ -919,42 +815,14 @@ export default function App() {
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
-              <button
-                className="hud-icon-btn"
-                onClick={handleCaptureWithMessage}
-                disabled={isBlocked}
-                title="Capture screen"
-              >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+              <button className="hud-icon-btn" onClick={handleCaptureWithMessage} disabled={isBlocked} title="Capture screen">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
-              <button
-                className="hud-icon-btn"
-                onClick={handleAutoAnswer}
-                disabled={isBlocked}
-                title="Auto-answer quiz"
-              >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+              <button className="hud-icon-btn" onClick={handleAutoAnswer} disabled={isBlocked} title="Auto-answer quiz">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                 </svg>
               </button>
@@ -962,11 +830,7 @@ export default function App() {
                 <textarea
                   ref={inputRef}
                   className="hud-input"
-                  placeholder={
-                    isAutomating
-                      ? automationStatus || "Automating..."
-                      : "Ask anything or capture screen..."
-                  }
+                  placeholder={isAutomating ? automationStatus || "Automating..." : "Ask anything or capture screen..."}
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
