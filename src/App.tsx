@@ -9,10 +9,10 @@ import { createClient } from "@supabase/supabase-js";
 import "./App.css";
 
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
+const ANALYZE_URL = "https://agrade-cbwf.onrender.com/analyze";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 const MAX_AUTOMATION_ROUNDS = 20;
-const AUTO_PROMPT = "Click the correct answer for every question on screen. Do not explain. Just click through all questions automatically until the quiz is done.";
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -393,15 +393,175 @@ export default function App() {
     }
   };
 
+  const analyzeScreen = async (base64Image: string): Promise<{
+    answer: string;
+    type: "multiple_choice" | "text_input";
+    confidence: number;
+  } | null> => {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+
+      const res = await fetch(ANALYZE_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ base64Image }),
+      });
+
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
+
+  const findAndClickAnswer = async (
+    base64Image: string,
+    answerText: string
+  ): Promise<boolean> => {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+
+      const res = await fetch(SERVER_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          base64Image,
+          message: `Find the text "${answerText}" on screen and click it. The text is a clickable answer option. Emit ONLY an [ACTION:click:X:Y] tag for its center coordinates. Nothing else.`,
+          history: [],
+        }),
+      });
+
+      const data = await res.json();
+      const rawText = data.result || "";
+      const { actions } = parseAutomationActions(rawText);
+
+      const clickAction = actions.find((a) => a.type === "click");
+      if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
+        await invoke("hide_window").catch(() => {});
+        await sleep(150);
+        setAutomationStatus(`Clicking "${answerText}"...`);
+        await invoke("click_at", { x: clickAction.x, y: clickAction.y });
+        await sleep(600);
+        await invoke("show_window").catch(() => {});
+        return true;
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   // ── One-tap auto button ────────────────────────────────────────────────────
   const handleAutoAnswer = async () => {
     if (isLoading || isAutomating) return;
-    const screenBase64 = await invoke<string>("capture_screen");
+    setIsAutomating(true);
+    setAutomationStatus("Capturing screen...");
+
     setMessages((prev) => [
       ...prev,
-      { role: "user", text: "Auto-answering quiz…", screenshotOnly: false },
+      {
+        role: "user",
+        text: "Auto-answering quiz...",
+      },
     ]);
-    await sendToServer(AUTO_PROMPT, screenBase64);
+
+    let round = 0;
+
+    while (round < MAX_AUTOMATION_ROUNDS) {
+      round++;
+
+      const screenBase64 = await invoke<string>("capture_screen");
+      setAutomationStatus(`Round ${round} - analyzing question...`);
+
+      const analysis = await analyzeScreen(screenBase64);
+
+      if (!analysis) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "Could not analyze screen.",
+            isAutomation: true,
+          },
+        ]);
+        break;
+      }
+
+      setAutomationStatus(`Answer: "${analysis.answer}" - locating...`);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `${analysis.answer}`,
+          isAutomation: true,
+        },
+      ]);
+
+      if (analysis.type === "multiple_choice") {
+        const clicked = await findAndClickAnswer(screenBase64, analysis.answer);
+        if (!clicked) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "ai",
+              text: "Could not locate answer on screen. Stopping.",
+              isAutomation: true,
+            },
+          ]);
+          break;
+        }
+      } else {
+        await invoke("hide_window").catch(() => {});
+        await sleep(150);
+        await invoke("click_at", { x: 0.5, y: 0.55 });
+        await sleep(150);
+        await invoke("type_text", { text: analysis.answer });
+        await sleep(150);
+        await invoke("type_text", { text: "\n" });
+        await sleep(600);
+        await invoke("show_window").catch(() => {});
+      }
+
+      const afterScreenshot = await invoke<string>("capture_screen");
+      setAutomationStatus(`Round ${round} - checking progress...`);
+
+      const checkRes = await fetch(SERVER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}),
+        },
+        body: JSON.stringify({
+          base64Image: afterScreenshot,
+          message:
+            "[AUTO] Is the quiz or task fully complete with no more questions remaining? Reply with only YES or NO.",
+          history: [],
+        }),
+      });
+      const checkData = await checkRes.json();
+      const checkText = (checkData.result || "").trim().toUpperCase();
+
+      if (checkText.startsWith("YES")) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "✓ Task complete.",
+            isAutomation: true,
+          },
+        ]);
+        break;
+      }
+
+      setTimeout(scrollToBottom, 50);
+    }
+
+    setIsAutomating(false);
+    setAutomationStatus("");
+    setTimeout(scrollToBottom, 50);
   };
 
   const handleSubmit = async () => {
