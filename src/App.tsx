@@ -12,10 +12,16 @@ const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const ANALYZE_URL = "https://agrade-cbwf.onrender.com/analyze";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
-const MAX_AUTOMATION_ROUNDS = 30;
+/** Max times we click "Next" / leave a page (each page may have many questions + scrolls). */
+const MAX_PAGE_NAVIGATIONS = 35;
+/** Max vision/analyze calls for one automation session (many per long page). */
+const MAX_ANALYZE_STEPS = 120;
 const MIN_OPTION_Y_GAP = 0.04;
 // How many times the same answer text must repeat before we scroll the page
 const SAME_ANSWER_SCROLL_THRESHOLD = 2;
+/** Down-scroll steps while hunting for more questions on the same page before clicking Next. */
+const MAX_SCROLLS_PER_PAGE = 10;
+const SCROLL_AMOUNT_PER_STEP = 3;
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -253,7 +259,7 @@ export default function App() {
       if (r.type !== "multiple_choice" && r.type !== "text_input") return null;
       const idx = r.option_index;
       const option_index =
-        typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 20 ? idx : null;
+        typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 24 ? idx : null;
       return {
         answer: r.answer,
         type: r.type as "multiple_choice" | "text_input",
@@ -349,7 +355,7 @@ export default function App() {
                   ? Math.max(0, Math.min(1, data.confidence))
                   : 0.7,
               option_index:
-                typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 20
+                typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 24
                   ? idx
                   : null,
             },
@@ -365,7 +371,7 @@ export default function App() {
           base64Image,
           jsonAnalyze: true,
           message:
-            'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=topmost option, 2=next, up to ~20 for long lists. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
+            'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index counts every visible choice from the top of the viewport downward (1,2,… up to ~24). If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
           history: [],
         }),
       });
@@ -416,7 +422,7 @@ export default function App() {
           ? uiaPositions
           : await invoke<[number, number][]>("find_option_positions", {
               base64Image,
-              maxOptions: 12,
+              maxOptions: 24,
             });
 
       // Remove positions clustered too tightly on the y-axis (likely mis-detections)
@@ -493,50 +499,62 @@ export default function App() {
     setIsAutomating(true);
     setMessages((prev) => [...prev, { role: "user", text: "Auto-answering quiz..." }]);
 
-    let round = 0;
+    let analyzeStep = 0;
+    let pageNavigations = 0;
     let consecutiveFailures = 0;
     let lastReason = "";
+    let stoppedEarlyNoQuestions = false;
 
-    // Track repeated answers to detect a stuck page — only scroll then
     let lastAnswerText = "";
     let sameAnswerCount = 0;
 
-    while (
-      round < MAX_AUTOMATION_ROUNDS &&
-      consecutiveFailures < 3 &&
-      !stopAutomationRef.current
-    ) {
-      round++;
-      setAutomationStatus(`Round ${round} - analyzing...`);
-      setTimeout(scrollToBottom, 50);
+    const scrollPageForMoreQuestions = async () => {
+      setAutomationStatus("Scrolling for more questions on this page...");
+      await invoke("hide_window").catch(() => {});
+      await sleep(150);
+      await invoke("scroll_down", { amount: SCROLL_AMOUNT_PER_STEP });
+      await sleep(500);
+      await invoke("show_window").catch(() => {});
+    };
 
-      const screenBase64 = await captureQuizScreenshot();
+    const clickNextToAdvance = async () => {
+      setAutomationStatus("All visible items handled — Next / continue...");
+      await invoke("hide_window").catch(() => {});
+      await sleep(300);
+      let foundNext = false;
+      try {
+        foundNext = await invoke<boolean>("click_next_button_uia");
+      } catch {
+        /* non-Windows or missing command */
+      }
+      if (!foundNext) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "UIA Next not found — falling back to coordinate click.",
+            isAutomation: true,
+          },
+        ]);
+        await invoke("click_at", { x: 0.85, y: 0.88 });
+      }
+      await sleep(1800);
+      await invoke("show_window").catch(() => {});
+      await sleep(400);
+    };
+
+    type AnalyzeStepResult = "answered" | "none_visible" | "failed";
+    const runOneQuestionFromScreen = async (
+      screenBase64: string
+    ): Promise<{ result: AnalyzeStepResult; reason?: string }> => {
       const { analysis, reason } = await analyzeScreen(screenBase64);
-
-      if (stopAutomationRef.current) break;
-
       if (!analysis) {
-        consecutiveFailures++;
-        lastReason = reason || "Unknown failure";
-        setMessages((prev) => [
-          ...prev,
-          { role: "ai", text: `Round ${round}: Analyze failed - ${lastReason}`, isAutomation: true },
-        ]);
-        await sleep(1000);
-        continue;
+        return { result: "failed", reason: reason || "Analyze failed" };
       }
-
       if (!analysis.answer || analysis.confidence < 0.35) {
-        setMessages((prev) => [
-          ...prev,
-          { role: "ai", text: "No quiz question detected. Stopping.", isAutomation: true },
-        ]);
-        break;
+        return { result: "none_visible" };
       }
 
-      consecutiveFailures = 0;
-
-      // Detect a stuck page: same answer seen too many times means clicks aren't registering
       if (analysis.answer === lastAnswerText) {
         sameAnswerCount++;
         if (sameAnswerCount >= SAME_ANSWER_SCROLL_THRESHOLD) {
@@ -544,19 +562,13 @@ export default function App() {
             ...prev,
             {
               role: "ai",
-              text: `Same question seen ${sameAnswerCount} times — scrolling page to recover.`,
+              text: "Same answer repeated — scrolling to reveal more items.",
               isAutomation: true,
             },
           ]);
-          setAutomationStatus("Scrolling stuck page...");
-          await invoke("hide_window").catch(() => {});
-          await sleep(150);
-          await invoke("scroll_down", { amount: 3 });
-          await sleep(700);
-          await invoke("show_window").catch(() => {});
+          await scrollPageForMoreQuestions();
           sameAnswerCount = 0;
-          await sleep(400);
-          continue;
+          return { result: "none_visible" };
         }
       } else {
         lastAnswerText = analysis.answer;
@@ -568,7 +580,7 @@ export default function App() {
         {
           role: "ai",
           text: `Answer: ${analysis.answer}${
-            analysis.option_index ? ` (option ${analysis.option_index})` : ""
+            analysis.option_index ? ` (choice #${analysis.option_index})` : ""
           }`,
           isAutomation: true,
         },
@@ -576,19 +588,12 @@ export default function App() {
 
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
-        setAutomationStatus(`Locating option ${idx}...`);
+        setAutomationStatus(`Locating choice #${idx}...`);
         const clicked = await clickOptionByIndex(screenBase64, idx);
         if (!clicked) {
-          setMessages((prev) => [
-            ...prev,
-            { role: "ai", text: `Could not detect option ${idx}. Retrying next round.`, isAutomation: true },
-          ]);
-          consecutiveFailures++;
-          await sleep(500);
-          continue;
+          return { result: "failed", reason: "Could not detect or click that choice" };
         }
       } else {
-        // Text input answer
         await invoke("hide_window").catch(() => {});
         await sleep(150);
         setAutomationStatus("Typing answer...");
@@ -601,40 +606,117 @@ export default function App() {
         await invoke("show_window").catch(() => {});
       }
 
-      if (stopAutomationRef.current) break;
+      await sleep(650);
+      return { result: "answered" };
+    };
 
-      // ----------------------------------------------------------------
-      // Advance to the next question.
-      // UIA finds the real Next/Submit button by accessible name.
-      // Falls back to the hardcoded coordinate if UIA finds nothing.
-      // ----------------------------------------------------------------
-      setAutomationStatus("Finding Next button...");
-      await invoke("hide_window").catch(() => {});
-      await sleep(300);
+    mainLoop: while (
+      pageNavigations < MAX_PAGE_NAVIGATIONS &&
+      analyzeStep < MAX_ANALYZE_STEPS &&
+      consecutiveFailures < 3 &&
+      !stopAutomationRef.current
+    ) {
+      pageNavigations++;
+      setAutomationStatus(`Page ${pageNavigations} — answering everything in view...`);
+      setTimeout(scrollToBottom, 50);
 
-      let foundNext = false;
-      try {
-        foundNext = await invoke<boolean>("click_next_button_uia");
-      } catch {
-        // command not available on this build
-      }
+      let scrollPasses = 0;
+      let answeredAnythingOnPage = false;
+      /** Exit early after this many viewports in a row with nothing new to answer. */
+      let emptyViewportsInRow = 0;
 
-      if (!foundNext) {
+      scrollLoop: while (
+        scrollPasses <= MAX_SCROLLS_PER_PAGE &&
+        analyzeStep < MAX_ANALYZE_STEPS &&
+        !stopAutomationRef.current
+      ) {
+        let answeredInThisViewport = false;
+
+        answerChain: while (analyzeStep < MAX_ANALYZE_STEPS && !stopAutomationRef.current) {
+          analyzeStep++;
+          setAutomationStatus(`Page ${pageNavigations} · analyze ${analyzeStep}...`);
+          setTimeout(scrollToBottom, 50);
+
+          const screenBase64 = await captureQuizScreenshot();
+          const { result, reason } = await runOneQuestionFromScreen(screenBase64);
+
+          if (stopAutomationRef.current) break mainLoop;
+
+          if (result === "failed") {
+            consecutiveFailures++;
+            lastReason = reason || "Unknown failure";
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "ai",
+                text: `Step ${analyzeStep}: ${lastReason} (${consecutiveFailures}/3)`,
+                isAutomation: true,
+              },
+            ]);
+            if (consecutiveFailures >= 3) break mainLoop;
+            await sleep(1000);
+            break answerChain;
+          }
+
+          consecutiveFailures = 0;
+
+          if (result === "none_visible") {
+            break answerChain;
+          }
+
+          answeredAnythingOnPage = true;
+          answeredInThisViewport = true;
+        }
+
+        if (stopAutomationRef.current) break mainLoop;
+
+        if (answeredInThisViewport) {
+          emptyViewportsInRow = 0;
+        } else {
+          emptyViewportsInRow++;
+          if (emptyViewportsInRow >= 2) {
+            break scrollLoop;
+          }
+        }
+
+        if (scrollPasses >= MAX_SCROLLS_PER_PAGE) {
+          break scrollLoop;
+        }
+
         setMessages((prev) => [
           ...prev,
           {
             role: "ai",
-            text: "UIA Next not found — falling back to coordinate click.",
+            text: "No unanswered item in this view — scrolling down.",
             isAutomation: true,
           },
         ]);
-        await invoke("click_at", { x: 0.85, y: 0.88 });
+        await scrollPageForMoreQuestions();
+        scrollPasses++;
+        await sleep(350);
       }
 
-      await sleep(1800);
-      await invoke("show_window").catch(() => {});
+      if (stopAutomationRef.current) break mainLoop;
 
-      await sleep(400);
+      if (!answeredAnythingOnPage) {
+        stoppedEarlyNoQuestions = true;
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text:
+              pageNavigations <= 1
+                ? "No quiz questions found on this page (after scrolling). Stopping."
+                : "No more questions to answer on this view — stopping.",
+            isAutomation: true,
+          },
+        ]);
+        break mainLoop;
+      }
+
+      await clickNextToAdvance();
+      lastAnswerText = "";
+      sameAnswerCount = 0;
       setTimeout(scrollToBottom, 50);
     }
 
@@ -648,14 +730,27 @@ export default function App() {
         ...prev,
         {
           role: "ai",
-          text: `Stopped after 3 consecutive failures. Last error: ${lastReason}`,
+          text: `Stopped after 3 failures. Last: ${lastReason}`,
           isAutomation: true,
         },
       ]);
-    } else if (round >= MAX_AUTOMATION_ROUNDS) {
+    } else if (!stoppedEarlyNoQuestions && analyzeStep >= MAX_ANALYZE_STEPS) {
       setMessages((prev) => [
         ...prev,
-        { role: "ai", text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`, isAutomation: true },
+        {
+          role: "ai",
+          text: `Reached ${MAX_ANALYZE_STEPS} analyze-step cap. Continue manually if needed.`,
+          isAutomation: true,
+        },
+      ]);
+    } else if (!stoppedEarlyNoQuestions && pageNavigations >= MAX_PAGE_NAVIGATIONS) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Reached ${MAX_PAGE_NAVIGATIONS} page navigation cap.`,
+          isAutomation: true,
+        },
       ]);
     }
 
