@@ -42,6 +42,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+// UIA / COM imports
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoCreateInstance,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Variant::VARIANT;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationInvokePattern,
+    TreeScope_Descendants,
+    UIA_ButtonControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_ControlTypePropertyId, UIA_InvokePatternId,
+};
+
 #[cfg(target_os = "windows")]
 fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
     unsafe {
@@ -422,6 +438,201 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
     found
 }
 
+/// Returns normalized (x, y) centers of RadioButton elements visible on screen,
+/// ordered top-to-bottom. Uses the Windows UI Automation API to read the
+/// actual accessibility tree — works regardless of visual theme or DPI scaling.
+/// Returns an empty vec on any error so the caller can fall back to pixel scanning.
+#[tauri::command]
+fn find_radio_buttons_uia() -> Vec<(f64, f64)> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        // CoInitializeEx is safe to call multiple times on the same thread;
+        // ignore the "already initialized" HRESULT.
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let automation: IUIAutomation =
+            match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                Ok(a) => a,
+                Err(_) => return vec![],
+            };
+
+        let root = match automation.GetRootElement() {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+
+        let condition = match automation.CreatePropertyCondition(
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_RadioButtonControlTypeId.0 as i32),
+        ) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let elements = match root.FindAll(TreeScope_Descendants, &condition) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+
+        let count = elements.Length().unwrap_or(0);
+        let sw = GetSystemMetrics(SM_CXSCREEN) as f64;
+        let sh = GetSystemMetrics(SM_CYSCREEN) as f64;
+        if sw == 0.0 || sh == 0.0 { return vec![]; }
+
+        // Collect (normalized_x, normalized_y, raw_top_for_sort)
+        let mut results: Vec<(f64, f64, i32)> = Vec::new();
+
+        for i in 0..count {
+            let el = match elements.GetElement(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let rect = match el.CurrentBoundingRectangle() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Skip zero-size or off-screen elements
+            if rect.right <= rect.left || rect.bottom <= rect.top { continue; }
+            if rect.left < 0 || rect.top < 0 { continue; }
+
+            let cx = ((rect.left + rect.right) as f64 / 2.0) / sw;
+            let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
+
+            // Only include elements inside the expected quiz option zone
+            // (mirrors the pixel-scan limits so the two paths agree)
+            if cx < 0.02 || cx > 0.50 { continue; }
+            if cy < 0.15 || cy > 0.90 { continue; }
+
+            results.push((cx, cy, rect.top));
+        }
+
+        results.sort_by_key(|r| r.2);
+        return results.into_iter().map(|(x, y, _)| (x, y)).collect();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    vec![]
+}
+
+/// Finds the first visible Button whose accessible name contains a known
+/// "advance" keyword ("next", "submit", "continue", etc.) and invokes it.
+///
+/// Prefers the UIA Invoke pattern (fires the handler without any mouse
+/// movement, so it works even while the window is partially hidden).
+/// Falls back to a raw SendInput click on the element's bounding-rect centre
+/// if the Invoke pattern is unavailable.
+///
+/// Returns true if a matching button was found and activated.
+#[tauri::command]
+fn click_next_button_uia() -> bool {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let automation: IUIAutomation =
+            match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
+
+        let root = match automation.GetRootElement() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        let condition = match automation.CreatePropertyCondition(
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_ButtonControlTypeId.0 as i32),
+        ) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let elements = match root.FindAll(TreeScope_Descendants, &condition) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        let count = elements.Length().unwrap_or(0);
+        let sw = GetSystemMetrics(SM_CXSCREEN) as f64;
+        let sh = GetSystemMetrics(SM_CYSCREEN) as f64;
+
+        // Ranked keywords — first match across all buttons wins.
+        // Covers the most common quiz platform labels.
+        let keywords = ["next", "submit", "continue", "confirm", "proceed", "check answer", "check", "done", "finish"];
+
+        for keyword in &keywords {
+            for i in 0..count {
+                let el = match elements.GetElement(i) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                let name = el
+                    .CurrentName()
+                    .unwrap_or_default()
+                    .to_string()
+                    .to_lowercase();
+
+                if !name.contains(keyword) { continue; }
+
+                // Skip invisible / zero-size / off-screen elements
+                let rect = match el.CurrentBoundingRectangle() {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                if rect.right <= rect.left || rect.bottom <= rect.top { continue; }
+                if rect.left < 0 || rect.top < 0 { continue; }
+
+                // Prefer the Invoke pattern — no mouse movement required
+                if let Ok(pattern_obj) = el.GetCurrentPattern(UIA_InvokePatternId) {
+                    if let Ok(invoke) = pattern_obj.cast::<IUIAutomationInvokePattern>() {
+                        if invoke.Invoke().is_ok() {
+                            return true;
+                        }
+                    }
+                }
+
+                // Fallback: click the element's centre via SendInput
+                let cx = ((rect.left + rect.right) as f64 / 2.0) / sw;
+                let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
+                let abs_x = (cx * 65535.0) as i32;
+                let abs_y = (cy * 65535.0) as i32;
+                let clicks = [
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: abs_x, dy: abs_y, mouseData: 0,
+                                dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE,
+                                time: 0, dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: abs_x, dy: abs_y, mouseData: 0,
+                                dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE,
+                                time: 0, dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                ];
+                SendInput(&clicks, std::mem::size_of::<INPUT>() as i32);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    false
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -445,6 +656,8 @@ fn main() {
             get_screen_size,
             find_option_positions,
             scroll_down,
+            find_radio_buttons_uia,
+            click_next_button_uia,
         ])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
