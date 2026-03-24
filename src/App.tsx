@@ -113,6 +113,15 @@ export default function App() {
     return shot;
   };
 
+  const isSafeClickPoint = (x: number, y: number): boolean => {
+    // Block risky edges/title-bar/taskbar zones to avoid closing windows/apps.
+    if (x < 0.06 || x > 0.94) return false;
+    if (y < 0.12 || y > 0.92) return false;
+    // Extra block for common top-right window controls.
+    if (x > 0.82 && y < 0.16) return false;
+    return true;
+  };
+
   const handleDeepLink = (url: string) => {
     try {
       const parsed = new URL(url);
@@ -418,6 +427,9 @@ export default function App() {
       const { actions } = parseAutomationActions(rawText);
       const clickAction = actions.find((a) => a.type === "click");
       if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
+        if (!isSafeClickPoint(clickAction.x, clickAction.y)) {
+          return { x: 0.5, y: 0.5, found: false };
+        }
         return { x: clickAction.x, y: clickAction.y, found: true };
       }
       return { x: 0.5, y: 0.5, found: false };
@@ -434,6 +446,10 @@ export default function App() {
     for (const action of actions) {
       try {
         if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
+          if (!isSafeClickPoint(action.x, action.y)) {
+            console.warn("Blocked unsafe click:", action);
+            continue;
+          }
           setAutomationStatus(`Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`);
           await invoke("click_at", { x: action.x, y: action.y });
           await sleep(120);
@@ -527,6 +543,14 @@ export default function App() {
         console.log("Location:", location);
 
         if (location.found) {
+          if (!isSafeClickPoint(location.x, location.y)) {
+            setMessages((prev) => [...prev, {
+              role: "ai",
+              text: "Blocked unsafe click near window controls. Stopping.",
+              isAutomation: true,
+            }]);
+            break;
+          }
           await invoke("hide_window").catch(() => {});
           await sleep(150);
           setAutomationStatus(`Clicking "${analysis.answer}"…`);
