@@ -37,7 +37,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, INPUT_KEYBOARD,
     MOUSEINPUT, KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, KEYEVENTF_KEYUP,
-    VIRTUAL_KEY,
+    VIRTUAL_KEY, MOUSEEVENTF_WHEEL,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -185,24 +185,93 @@ fn get_screen_size() -> (i32, i32) {
 fn click_at(x: f64, y: f64) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     unsafe {
-        let abs_x = ((x * 65535.0) as i32).clamp(0, 65535);
-        let abs_y = ((y * 65535.0) as i32).clamp(0, 65535);
-        let inputs = [
+        let screen_w = GetSystemMetrics(SM_CXSCREEN) as f64;
+        let screen_h = GetSystemMetrics(SM_CYSCREEN) as f64;
+        let target_x = (x * screen_w) as i32;
+        let target_y = (y * screen_h) as i32;
+
+        let mut cursor = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut cursor).ok();
+
+        let steps = 28;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = if t < 0.5 {
+                2.0 * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+            };
+            let mx = (cursor.x as f64 + (target_x as f64 - cursor.x as f64) * ease) as i32;
+            let my = (cursor.y as f64 + (target_y as f64 - cursor.y as f64) * ease) as i32;
+            let abs_x = ((mx as f64 / screen_w) * 65535.0) as i32;
+            let abs_y = ((my as f64 / screen_h) * 65535.0) as i32;
+            let input = INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: abs_x,
+                        dy: abs_y,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            };
+            SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+            thread::sleep(Duration::from_millis(8));
+        }
+
+        let abs_x = ((target_x as f64 / screen_w) * 65535.0) as i32;
+        let abs_y = ((target_y as f64 / screen_h) * 65535.0) as i32;
+        let clicks = [
             INPUT {
                 r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: abs_x, dy: abs_y, mouseData: 0,
+                        dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE,
+                        time: 0, dwExtraInfo: 0,
+                    },
+                },
             },
             INPUT {
                 r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
-            },
-            INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: abs_x, dy: abs_y, mouseData: 0,
+                        dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE,
+                        time: 0, dwExtraInfo: 0,
+                    },
+                },
             },
         ];
-        if SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == 0 {
-            return Err("SendInput failed".to_string());
+        if SendInput(&clicks, std::mem::size_of::<INPUT>() as i32) == 0 {
+            return Err("SendInput click failed".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn scroll_down(amount: i32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: ((-120_i32).wrapping_mul(amount)) as u32,
+                    dwFlags: MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        if SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 0 {
+            return Err("SendInput scroll failed".to_string());
         }
     }
     Ok(())
@@ -358,6 +427,7 @@ fn main() {
             type_text,
             get_screen_size,
             find_option_positions,
+            scroll_down,
         ])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
