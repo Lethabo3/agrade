@@ -163,11 +163,18 @@ app.post("/analyze", express.json({ limit: "10mb" }), async (req, res) => {
     const raw = await callGroq([
       {
         role: "system",
-        content: `You are a quiz answering assistant. Look at the screenshot and identify the question and correct answer.
-You MUST respond with ONLY a raw JSON object. No markdown, no backticks, no explanation, no extra text.
-Exact format: {"answer":"exact text of correct option","type":"multiple_choice","confidence":0.95}
-For text input questions use: {"answer":"the answer to type","type":"text_input","confidence":0.95}
-The answer field must exactly match the text visible on screen for the correct option.`,
+        content: `You are a quiz answering assistant analyzing a screenshot of a quiz page.
+You MUST respond with ONLY a raw JSON object. No markdown, no backticks, no explanation.
+
+IMPORTANT: Options may be full sentences (e.g. "An automation process with which you can...").
+- Copy the answer field EXACTLY as the full option text appears on screen, word for word.
+- Do not summarize or shorten it — copy it precisely so it can be found on screen.
+- option_index: which option it is (1=first radio button from top, 2=second, 3=third, 4=fourth).
+
+Format: {"answer":"exact full text of correct option","type":"multiple_choice","confidence":0.95,"option_index":3}
+For text input: {"answer":"word or phrase to type","type":"text_input","confidence":0.95,"option_index":null}
+
+If no question is visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}`,
       },
       {
         role: "user",
