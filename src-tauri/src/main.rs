@@ -47,9 +47,10 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoCreateInstance,
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    VARIANT,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Variant::VARIANT;
+use windows::core::Interface;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationInvokePattern,
@@ -560,7 +561,10 @@ fn click_next_button_uia() -> bool {
 
         // Ranked keywords — first match across all buttons wins.
         // Covers the most common quiz platform labels.
-        let keywords = ["next", "submit", "continue", "confirm", "proceed", "check answer", "check", "done", "finish"];
+        let keywords = [
+            "next", "submit", "continue", "confirm",
+            "proceed", "check answer", "check", "done", "finish",
+        ];
 
         for keyword in &keywords {
             for i in 0..count {
@@ -588,6 +592,7 @@ fn click_next_button_uia() -> bool {
                 // Prefer the Invoke pattern — no mouse movement required
                 if let Ok(pattern_obj) = el.GetCurrentPattern(UIA_InvokePatternId) {
                     if let Ok(invoke) = pattern_obj.cast::<IUIAutomationInvokePattern>() {
+                        let invoke: IUIAutomationInvokePattern = invoke;
                         if invoke.Invoke().is_ok() {
                             return true;
                         }
