@@ -52,7 +52,6 @@ fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
             current_style | WS_EX_LAYERED.0 as i32,
         );
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
-
         let blur = DWM_BLURBEHIND {
             dwFlags: 0x00000001,
             fEnable: true.into(),
@@ -86,16 +85,11 @@ fn get_secondary_monitor_position() -> Option<(i32, i32)> {
             Some(monitor_enum_proc),
             LPARAM(&mut monitors as *mut Vec<HMONITOR> as isize),
         );
-
-        if monitors.len() < 2 {
-            return None;
-        }
-
+        if monitors.len() < 2 { return None; }
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-
         for monitor in &monitors[1..] {
             if GetMonitorInfoW(*monitor, &mut info).as_bool() {
                 return Some((info.rcWork.left, info.rcWork.top));
@@ -109,25 +103,10 @@ fn install_virtual_display(resource_dir: PathBuf) {
     let drivers_dir = resource_dir.join("drivers");
     let cert = drivers_dir.join("iddsampledriver.cer");
     let inf = drivers_dir.join("iddsampledriver.inf");
-
-    if !cert.exists() || !inf.exists() {
-        return;
-    }
-
-    Command::new("certutil")
-        .args(["-addstore", "-f", "root", cert.to_str().unwrap()])
-        .output()
-        .ok();
-
-    Command::new("certutil")
-        .args(["-addstore", "-f", "TrustedPublisher", cert.to_str().unwrap()])
-        .output()
-        .ok();
-
-    Command::new("pnputil")
-        .args(["/add-driver", inf.to_str().unwrap(), "/install"])
-        .output()
-        .ok();
+    if !cert.exists() || !inf.exists() { return; }
+    Command::new("certutil").args(["-addstore", "-f", "root", cert.to_str().unwrap()]).output().ok();
+    Command::new("certutil").args(["-addstore", "-f", "TrustedPublisher", cert.to_str().unwrap()]).output().ok();
+    Command::new("pnputil").args(["/add-driver", inf.to_str().unwrap(), "/install"]).output().ok();
 }
 
 #[tauri::command]
@@ -140,12 +119,7 @@ fn capture_screen() -> String {
     let image = screen.capture().unwrap();
     let mut bytes: Vec<u8> = Vec::new();
     PngEncoder::new(Cursor::new(&mut bytes))
-        .write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            image::ColorType::Rgba8.into(),
-        )
+        .write_image(image.as_raw(), image.width(), image.height(), image::ColorType::Rgba8.into())
         .unwrap();
     general_purpose::STANDARD.encode(&bytes)
 }
@@ -170,11 +144,7 @@ fn hide_window(window: tauri::WebviewWindow) -> Result<(), String> {
     unsafe {
         let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            style | WS_EX_TRANSPARENT.0 as i32 | WS_EX_LAYERED.0 as i32,
-        );
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT.0 as i32 | WS_EX_LAYERED.0 as i32);
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA).ok();
     }
     Ok(())
@@ -186,11 +156,7 @@ fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
     unsafe {
         let hwnd = HWND(window.hwnd().unwrap().0 as *mut core::ffi::c_void);
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            (style & !(WS_EX_TRANSPARENT.0 as i32)) | WS_EX_LAYERED.0 as i32,
-        );
+        SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !(WS_EX_TRANSPARENT.0 as i32)) | WS_EX_LAYERED.0 as i32);
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
         apply_stealth_flags(hwnd).ok();
     }
@@ -201,9 +167,7 @@ fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
 fn get_screen_size() -> (i32, i32) {
     #[cfg(target_os = "windows")]
     unsafe {
-        let w = GetSystemMetrics(SM_CXSCREEN);
-        let h = GetSystemMetrics(SM_CYSCREEN);
-        return (w, h);
+        return (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -223,41 +187,21 @@ fn click_at(x: f64, y: f64) -> Result<(), String> {
     unsafe {
         let abs_x = ((x * 65535.0) as i32).clamp(0, 65535);
         let abs_y = ((y * 65535.0) as i32).clamp(0, 65535);
-
-        let move_input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: abs_x, dy: abs_y, mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-                    time: 0, dwExtraInfo: 0,
-                },
+        let inputs = [
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
             },
-        };
-        let down_input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: abs_x, dy: abs_y, mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE,
-                    time: 0, dwExtraInfo: 0,
-                },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
             },
-        };
-        let up_input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: abs_x, dy: abs_y, mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE,
-                    time: 0, dwExtraInfo: 0,
-                },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: abs_x, dy: abs_y, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, time: 0, dwExtraInfo: 0 } },
             },
-        };
-
-        let inputs = [move_input, down_input, up_input];
-        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        if result == 0 {
+        ];
+        if SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == 0 {
             return Err("SendInput failed".to_string());
         }
     }
@@ -268,43 +212,20 @@ fn click_at(x: f64, y: f64) -> Result<(), String> {
 fn type_text(text: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            KEYEVENTF_UNICODE,
-        };
-
+        use windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE;
         let mut inputs: Vec<INPUT> = Vec::new();
-
         for ch in text.encode_utf16() {
             inputs.push(INPUT {
                 r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: ch,
-                        dwFlags: KEYEVENTF_UNICODE,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
+                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYEVENTF_UNICODE, time: 0, dwExtraInfo: 0 } },
             });
             inputs.push(INPUT {
                 r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: ch,
-                        dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
+                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: ch, dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 } },
             });
         }
-
         if inputs.is_empty() { return Ok(()); }
-
-        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        if result == 0 {
+        if SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == 0 {
             return Err("SendInput (keyboard) failed".to_string());
         }
     }
@@ -319,7 +240,6 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
         Ok(b) => b,
         Err(_) => return vec![],
     };
-
     let img = match image::load_from_memory(&bytes) {
         Ok(i) => i,
         Err(_) => return vec![],
@@ -328,115 +248,85 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
     let (width, height) = img.dimensions();
     let mut found: Vec<(f64, f64)> = Vec::new();
 
-    // Only scan left 15% of screen — radio buttons are always here
     let scan_x_max = (width as f32 * 0.15) as u32;
-    let scan_y_min = (height as f32 * 0.10) as u32;
+    let scan_y_min = (height as f32 * 0.22) as u32;
     let scan_y_max = (height as f32 * 0.92) as u32;
-
     let mut last_found_y: i32 = -60;
 
-    // ── Pass 1: medium-grey border (Coursera, Google Forms, most modern sites) ──
+    // Pass 1: medium-grey border
     for y in scan_y_min..scan_y_max {
-        if (y as i32) - last_found_y < 25 { continue; }
-
+        if (y as i32) - last_found_y < 40 { continue; }
         for x in 4..scan_x_max {
             let Rgba([r, g, b, a]) = img.get_pixel(x, y);
             if a < 200 { continue; }
-
             let brightness = r as u32 + g as u32 + b as u32;
-
-            // Medium grey border: each channel 130-210, roughly equal (grey not coloured)
-            let is_grey_border = brightness > 390
-                && brightness < 630
+            let is_grey_border = brightness > 390 && brightness < 630
                 && (r as i32 - b as i32).abs() < 35
                 && (r as i32 - g as i32).abs() < 35
                 && r > 120 && r < 220;
-
             if !is_grey_border { continue; }
-
-            // Center of circle (6px right) should be near-white
             let check_x = x + 6;
             if check_x >= width { continue; }
             let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
-            let center_brightness = cr as u32 + cg as u32 + cb as u32;
-            if center_brightness < 600 { continue; }
-
-            // Above and below center also light — confirms it's a circle not a line
+            if (cr as u32 + cg as u32 + cb as u32) < 600 { continue; }
             if y < 4 || y + 4 >= height { continue; }
             let Rgba([ar, ag, ab, _]) = img.get_pixel(check_x, y - 4);
             let Rgba([br2, bg2, bb2, _]) = img.get_pixel(check_x, y + 4);
             if (ar as u32 + ag as u32 + ab as u32) < 500 { continue; }
             if (br2 as u32 + bg2 as u32 + bb2 as u32) < 500 { continue; }
-
             last_found_y = y as i32;
-            let nx = x as f64 / width as f64;
-            let ny = y as f64 / height as f64;
-            found.push((nx, ny));
+            found.push((x as f64 / width as f64, y as f64 / height as f64));
             if found.len() >= max_options { return found; }
             break;
         }
     }
 
-    // ── Pass 2: dark border fallback (older sites, dark-mode, high-contrast) ──
+    // Pass 2: dark border fallback
     if found.is_empty() {
         last_found_y = -60;
         for y in scan_y_min..scan_y_max {
-            if (y as i32) - last_found_y < 25 { continue; }
-
+            if (y as i32) - last_found_y < 40 { continue; }
             for x in 4..scan_x_max {
                 let Rgba([r, g, b, a]) = img.get_pixel(x, y);
                 if a < 200 { continue; }
-
                 let brightness = r as u32 + g as u32 + b as u32;
-                // Dark border: below 300 total but not pure black text
                 if brightness < 80 || brightness > 300 { continue; }
-                // Roughly grey/neutral
                 if (r as i32 - b as i32).abs() > 40 { continue; }
-
                 let check_x = x + 5;
                 if check_x >= width { continue; }
                 let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
                 if (cr as u32 + cg as u32 + cb as u32) < 550 { continue; }
-
                 last_found_y = y as i32;
-                let nx = x as f64 / width as f64;
-                let ny = y as f64 / height as f64;
-                found.push((nx, ny));
+                found.push((x as f64 / width as f64, y as f64 / height as f64));
                 if found.len() >= max_options { return found; }
                 break;
             }
         }
     }
 
-    // ── Pass 3: scan wider area (15->25%) in case buttons are indented ──
+    // Pass 3: wider scan
     if found.is_empty() {
         let scan_x_max_wide = (width as f32 * 0.25) as u32;
         last_found_y = -60;
         for y in scan_y_min..scan_y_max {
-            if (y as i32) - last_found_y < 25 { continue; }
-
+            if (y as i32) - last_found_y < 40 { continue; }
             for x in 4..scan_x_max_wide {
                 let Rgba([r, g, b, a]) = img.get_pixel(x, y);
                 if a < 200 { continue; }
                 let brightness = r as u32 + g as u32 + b as u32;
                 if brightness < 300 || brightness > 700 { continue; }
                 if (r as i32 - b as i32).abs() > 50 { continue; }
-
                 let check_x = x + 6;
                 if check_x >= width { continue; }
                 let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
                 if (cr as u32 + cg as u32 + cb as u32) < 550 { continue; }
-
                 if y < 4 || y + 4 >= height { continue; }
                 let Rgba([ar, ag, ab, _]) = img.get_pixel(check_x, y - 4);
                 let Rgba([br2, bg2, bb2, _]) = img.get_pixel(check_x, y + 4);
                 if (ar as u32 + ag as u32 + ab as u32) < 480 { continue; }
                 if (br2 as u32 + bg2 as u32 + bb2 as u32) < 480 { continue; }
-
                 last_found_y = y as i32;
-                let nx = x as f64 / width as f64;
-                let ny = y as f64 / height as f64;
-                found.push((nx, ny));
+                found.push((x as f64 / width as f64, y as f64 / height as f64));
                 if found.len() >= max_options { return found; }
                 break;
             }
@@ -472,23 +362,15 @@ fn main() {
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
             install_virtual_display(resource_dir);
-
             #[cfg(target_os = "windows")]
             {
-                use tauri::Manager;
                 let main_window = app.get_webview_window("main").unwrap();
                 main_window.set_always_on_top(true).unwrap();
-
                 let hwnd = HWND(main_window.hwnd().unwrap().0 as *mut core::ffi::c_void);
                 apply_stealth_flags(hwnd).expect("Failed to apply stealth flags");
-
                 if let Some((x, y)) = get_secondary_monitor_position() {
                     unsafe {
-                        SetWindowPos(
-                            hwnd, HWND_TOPMOST,
-                            x + 20, y + 20, 0, 0,
-                            SWP_NOSIZE,
-                        ).ok();
+                        SetWindowPos(hwnd, HWND_TOPMOST, x + 20, y + 20, 0, 0, SWP_NOSIZE).ok();
                     }
                 }
             }
