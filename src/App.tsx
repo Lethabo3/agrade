@@ -422,6 +422,7 @@ export default function App() {
         `Find the quiz answer option text "${compact}" on the browser page and click its center. Ignore app overlays, IDE/editor text, taskbar, and system UI. Emit ONLY one [ACTION:click:X:Y] tag. If not found, emit nothing.`,
         `Find and click the answer option that BEST MATCHES this phrase: "${shortPhrase}". The full option may be longer/truncated. Ignore app overlays and non-browser UI. Emit ONLY one [ACTION:click:X:Y] tag.`,
         `Find and click the quiz option semantically matching: "${anchorPhrase}". Do not click chrome tabs, address bar, close buttons, taskbar, or this app. Emit ONLY one [ACTION:click:X:Y] tag.`,
+        `A quiz is visible in the browser. Click the option whose meaning best matches this correct answer: "${compact}". The text on screen may be wrapped, shortened, or partially hidden. Click only inside the quiz options area (not tabs, address bar, window controls, taskbar, or this app). Emit ONLY one [ACTION:click:X:Y] tag.`,
       ];
 
       for (const message of prompts) {
@@ -442,6 +443,35 @@ export default function App() {
         if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
           if (!isSafeClickPoint(clickAction.x, clickAction.y)) continue;
           return { x: clickAction.x, y: clickAction.y, found: true };
+        }
+      }
+
+      // Final fallback: center-mass guess inside typical options region.
+      const finalRes = await fetch(SERVER_URL, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          base64Image,
+          message:
+            `Return ONLY JSON: {"x":0-1,"y":0-1}. Pick the center of the most likely answer option matching: "${shortPhrase}". ` +
+            `Constrain x between 0.12 and 0.88 and y between 0.25 and 0.86.`,
+          history: [],
+        }),
+      });
+      if (finalRes.ok) {
+        const finalData = await finalRes.json();
+        const raw = String(finalData?.result || "").replace(/```json|```/g, "").trim();
+        try {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+            const x = Math.max(0.12, Math.min(0.88, parsed.x));
+            const y = Math.max(0.25, Math.min(0.86, parsed.y));
+            if (isSafeClickPoint(x, y)) {
+              return { x, y, found: true };
+            }
+          }
+        } catch {
+          // ignore and fall through
         }
       }
 
