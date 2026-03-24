@@ -88,6 +88,7 @@ export default function App() {
   const [message, setMessage] = useState<string>("");
   const [authReady, setAuthReady] = useState(false);
   const tokenRef = useRef<string | null>(null);
+  const stopAutomationRef = useRef<boolean>(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -100,6 +101,16 @@ export default function App() {
     const h: Record<string, string> = { "Content-Type": "application/json" };
     if (tokenRef.current) h["Authorization"] = `Bearer ${tokenRef.current}`;
     return h;
+  };
+
+  const captureQuizScreenshot = async (): Promise<string> => {
+    // Hide overlay before capture so model sees the browser page, not this app.
+    await invoke("hide_window").catch(() => {});
+    await sleep(180);
+    const shot = await invoke<string>("capture_screen");
+    await sleep(80);
+    await invoke("show_window").catch(() => {});
+    return shot;
   };
 
   const handleDeepLink = (url: string) => {
@@ -353,7 +364,7 @@ export default function App() {
         body: JSON.stringify({
           base64Image,
           message:
-            'Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0}.',
+            'You are analyzing a browser quiz screenshot. Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0}. If a quiz question/options are not clearly visible, return {"answer":"","type":"multiple_choice","confidence":0}.',
           history: [],
         }),
       });
@@ -397,7 +408,7 @@ export default function App() {
         headers: authHeaders(),
         body: JSON.stringify({
           base64Image,
-          message: `Find the text "${text}" on screen and click it. The text is a clickable answer option. Emit ONLY an [ACTION:click:X:Y] tag for the center coordinates. Nothing else.`,
+          message: `Find the quiz answer option text "${text}" on the browser page and click it. Ignore app overlays, IDE/editor text, taskbar, and system UI. Emit ONLY one [ACTION:click:X:Y] tag for the option center coordinates. If not found, emit nothing.`,
           history: [],
         }),
       });
@@ -447,6 +458,7 @@ export default function App() {
   // ── Auto-answer loop using analyze + locate ───────────────────────────────
   const handleAutoAnswer = async () => {
     if (isLoading || isAutomating) return;
+    stopAutomationRef.current = false;
     setIsAutomating(true);
 
     setMessages((prev) => [...prev, {
@@ -458,14 +470,19 @@ export default function App() {
     let consecutiveFailures = 0;
     let lastAnalyzeReason = "";
 
-    while (round < MAX_AUTOMATION_ROUNDS && consecutiveFailures < 3) {
+    while (
+      round < MAX_AUTOMATION_ROUNDS &&
+      consecutiveFailures < 3 &&
+      !stopAutomationRef.current
+    ) {
       round++;
       setAutomationStatus(`Round ${round} — analyzing…`);
       setTimeout(scrollToBottom, 50);
 
-      const screenBase64 = await invoke<string>("capture_screen");
+      const screenBase64 = await captureQuizScreenshot();
       const analyzeResult = await analyzeScreen(screenBase64);
       const analysis = analyzeResult.analysis;
+      if (stopAutomationRef.current) break;
 
       if (!analysis) {
         consecutiveFailures++;
@@ -482,6 +499,15 @@ export default function App() {
         }
         await sleep(1000);
         continue;
+      }
+
+      if (!analysis.answer || analysis.confidence < 0.35) {
+        setMessages((prev) => [...prev, {
+          role: "ai",
+          text: "Quiz question was not clearly detected on screen. Stopping automation.",
+          isAutomation: true,
+        }]);
+        break;
       }
 
       consecutiveFailures = 0;
@@ -531,10 +557,11 @@ export default function App() {
         await sleep(800);
         await invoke("show_window").catch(() => {});
       }
+      if (stopAutomationRef.current) break;
 
       // Check if done
       setAutomationStatus(`Round ${round} — checking if complete…`);
-      const afterScreen = await invoke<string>("capture_screen");
+      const afterScreen = await captureQuizScreenshot();
 
       const checkResult = await fetchFromServer(
         "[AUTO] Is this quiz or task now fully complete with no more unanswered questions? Reply YES or NO only.",
@@ -559,7 +586,13 @@ export default function App() {
       setTimeout(scrollToBottom, 50);
     }
 
-    if (consecutiveFailures >= 3) {
+    if (stopAutomationRef.current) {
+      setMessages((prev) => [...prev, {
+        role: "ai",
+        text: "Automation stopped.",
+        isAutomation: true,
+      }]);
+    } else if (consecutiveFailures >= 3) {
       setMessages((prev) => [...prev, {
         role: "ai",
         text: `Could not analyze screen after multiple attempts. Last error: ${lastAnalyzeReason || "Unknown failure"}`,
@@ -567,7 +600,7 @@ export default function App() {
       }]);
     }
 
-    if (round >= MAX_AUTOMATION_ROUNDS) {
+    if (!stopAutomationRef.current && round >= MAX_AUTOMATION_ROUNDS) {
       setMessages((prev) => [...prev, {
         role: "ai",
         text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`,
@@ -577,7 +610,14 @@ export default function App() {
 
     setIsAutomating(false);
     setAutomationStatus("");
+    stopAutomationRef.current = false;
     setTimeout(scrollToBottom, 50);
+  };
+
+  const handleStopAutomation = () => {
+    if (!isAutomating) return;
+    stopAutomationRef.current = true;
+    setAutomationStatus("Stopping automation...");
   };
 
   // ── Normal send ────────────────────────────────────────────────────────────
@@ -622,7 +662,11 @@ export default function App() {
   };
 
   const handleSubmit = async () => {
-    if (!message.trim() || isLoading || isAutomating) return;
+    if (isAutomating) {
+      handleStopAutomation();
+      return;
+    }
+    if (!message.trim() || isLoading) return;
     const userText = message.trim();
     setMessage("");
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
@@ -860,13 +904,19 @@ export default function App() {
                 />
                 <button
                   className="hud-send-btn"
-                  onClick={handleSubmit}
-                  disabled={isBlocked || !message.trim()}
-                  title="Send"
+                  onClick={isAutomating ? handleStopAutomation : handleSubmit}
+                  disabled={isLoading || (!isAutomating && !message.trim())}
+                  title={isAutomating ? "Stop automation" : "Send"}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
-                  </svg>
+                  {isAutomating ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                      <rect x="5" y="5" width="14" height="14" rx="2" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
+                    </svg>
+                  )}
                 </button>
               </div>
             </div>
