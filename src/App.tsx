@@ -463,41 +463,49 @@ export default function App() {
     }
   };
 
-  const locateOptionByIndex = async (
+  const clickOptionByIndex = async (
     base64Image: string,
     optionIndex: number
-  ): Promise<{ x: number; y: number; found: boolean }> => {
-    if (![1, 2, 3, 4].includes(optionIndex)) return { x: 0.5, y: 0.5, found: false };
-
+  ): Promise<boolean> => {
     try {
-      const prompts = [
-        `A quiz is visible in a browser. Click the center of option #${optionIndex} (count only visible answer options from top to bottom). Ignore tabs, address bar, taskbar, IDE, and this app. Emit ONLY one [ACTION:click:X:Y] tag.`,
-        `Click answer choice number ${optionIndex} for the current question (1=first option shown). Only click inside quiz options area. Emit ONLY one [ACTION:click:X:Y] tag.`,
-      ];
+      const positions = await invoke<[number, number][]>(
+        "find_option_positions",
+        { base64Image, maxOptions: 8 }
+      );
 
-      for (const message of prompts) {
-        const res = await fetch(SERVER_URL, {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            base64Image,
-            message,
-            history: [],
-          }),
-        });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const rawText = String(data?.result || "");
-        const { actions } = parseAutomationActions(rawText);
-        const clickAction = actions.find((a) => a.type === "click");
-        if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
-          if (!isSafeClickPoint(clickAction.x, clickAction.y)) continue;
-          return { x: clickAction.x, y: clickAction.y, found: true };
-        }
+      console.log("Found option positions:", positions);
+
+      if (positions.length === 0) {
+        console.warn("No radio buttons found via pixel scan");
+        return false;
       }
-      return { x: 0.5, y: 0.5, found: false };
-    } catch {
-      return { x: 0.5, y: 0.5, found: false };
+
+      const target = positions[optionIndex - 1];
+      if (!target) {
+        console.warn(
+          `Option ${optionIndex} not found, only ${positions.length} options detected`
+        );
+        const fallback = positions[positions.length - 1];
+        if (!fallback || !isSafeClickPoint(fallback[0], fallback[1])) return false;
+        await invoke("hide_window").catch(() => {});
+        await sleep(150);
+        await invoke("click_at", { x: fallback[0], y: fallback[1] });
+        await sleep(800);
+        await invoke("show_window").catch(() => {});
+        return true;
+      }
+
+      if (!isSafeClickPoint(target[0], target[1])) return false;
+      await invoke("hide_window").catch(() => {});
+      await sleep(150);
+      setAutomationStatus(`Clicking option ${optionIndex}...`);
+      await invoke("click_at", { x: target[0], y: target[1] });
+      await sleep(800);
+      await invoke("show_window").catch(() => {});
+      return true;
+    } catch (err) {
+      console.error("clickOptionByIndex failed:", err);
+      return false;
     }
   };
 
@@ -600,35 +608,25 @@ export default function App() {
       }]);
 
       if (analysis.type === "multiple_choice") {
-        let location = { x: 0.5, y: 0.5, found: false };
+        const idx = analysis.option_index ?? 1;
+        setAutomationStatus(`Clicking option ${idx}...`);
+        let clicked = await clickOptionByIndex(screenBase64, idx);
 
-        if (analysis.option_index) {
-          setAutomationStatus(`Locating option #${analysis.option_index}...`);
-          location = await locateOptionByIndex(screenBase64, analysis.option_index);
-        }
-
-        if (!location.found) {
+        if (!clicked) {
           setAutomationStatus("Locating by text...");
-          location = await locateOnScreen(screenBase64, analysis.answer);
-        }
-        console.log("Location:", location);
-
-        if (location.found) {
-          if (!isSafeClickPoint(location.x, location.y)) {
-            setMessages((prev) => [...prev, {
-              role: "ai",
-              text: "Blocked unsafe click near window controls. Stopping.",
-              isAutomation: true,
-            }]);
-            break;
+          const location = await locateOnScreen(screenBase64, analysis.answer);
+          if (location.found) {
+            await invoke("hide_window").catch(() => {});
+            await sleep(150);
+            setAutomationStatus("Clicking option...");
+            await invoke("click_at", { x: location.x, y: location.y });
+            await sleep(800);
+            await invoke("show_window").catch(() => {});
+            clicked = true;
           }
-          await invoke("hide_window").catch(() => {});
-          await sleep(150);
-          setAutomationStatus("Clicking option...");
-          await invoke("click_at", { x: location.x, y: location.y });
-          await sleep(800);
-          await invoke("show_window").catch(() => {});
-        } else {
+        }
+
+        if (!clicked) {
           setMessages((prev) => [...prev, {
             role: "ai",
             text: "Could not locate option on screen.",
