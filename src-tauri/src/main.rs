@@ -20,6 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WDA_EXCLUDEFROMCAPTURE,
     SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
     SetLayeredWindowAttributes, LWA_ALPHA,
+    GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
@@ -30,7 +31,16 @@ use windows::Win32::Graphics::Dwm::{
     DwmEnableBlurBehindWindow, DWM_BLURBEHIND,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+use windows::Win32::Foundation::{BOOL, LPARAM, RECT, POINT};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, INPUT_KEYBOARD,
+    MOUSEINPUT, KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 #[cfg(target_os = "windows")]
 fn apply_stealth_flags(hwnd: HWND) -> windows::core::Result<()> {
@@ -197,6 +207,145 @@ fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_screen_size() -> (i32, i32) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let w = GetSystemMetrics(SM_CXSCREEN);
+        let h = GetSystemMetrics(SM_CYSCREEN);
+        return (w, h);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Fallback: query via screenshots crate
+        if let Ok(screens) = Screen::all() {
+            if let Some(s) = screens.first() {
+                let info = s.display_info;
+                return (info.width as i32, info.height as i32);
+            }
+        }
+        (1920, 1080)
+    }
+}
+
+/// Click at normalized coordinates (0.0–1.0) relative to primary screen size.
+/// Using normalized coords makes calls resolution-independent from the frontend.
+#[tauri::command]
+fn click_at(x: f64, y: f64) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+
+        // SendInput MOUSEEVENTF_ABSOLUTE uses a 0–65535 virtual desktop space
+        let abs_x = ((x * 65535.0) as i32).clamp(0, 65535);
+        let abs_y = ((y * 65535.0) as i32).clamp(0, 65535);
+
+        let move_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: abs_x,
+                    dy: abs_y,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let down_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: abs_x,
+                    dy: abs_y,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let up_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: abs_x,
+                    dy: abs_y,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let inputs = [move_input, down_input, up_input];
+        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if result == 0 {
+            return Err("SendInput failed".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Type a string of text via keyboard input events.
+/// Supports printable ASCII. For special keys, extend with VK codes as needed.
+#[tauri::command]
+fn type_text(text: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_UNICODE, KEYEVENTF_KEYUP,
+            SendInput,
+        };
+
+        let mut inputs: Vec<INPUT> = Vec::new();
+
+        for ch in text.encode_utf16() {
+            // Key down
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wScan: ch,
+                        dwFlags: KEYEVENTF_UNICODE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+            // Key up
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wScan: ch,
+                        dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+        }
+
+        if inputs.is_empty() {
+            return Ok(());
+        }
+
+        let result = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if result == 0 {
+            return Err("SendInput (keyboard) failed".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -214,7 +363,10 @@ fn main() {
             capture_screen,
             reapply_stealth,
             hide_window,
-            show_window
+            show_window,
+            click_at,
+            type_text,
+            get_screen_size,
         ])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().unwrap();
