@@ -22,6 +22,7 @@ interface Message {
   text: string;
   screenshotOnly?: boolean;
   isLimit?: boolean;
+  isAutomation?: boolean;
 }
 
 interface HistoryEntry {
@@ -29,20 +30,71 @@ interface HistoryEntry {
   content: string;
 }
 
+// Parsed action from AI automation response
+interface AutomationAction {
+  type: "click" | "type" | "wait" | "screenshot";
+  x?: number;       // normalized 0.0–1.0 for click
+  y?: number;       // normalized 0.0–1.0 for click
+  text?: string;    // for type
+  ms?: number;      // for wait
+}
+
 const stripMarkdown = (text: string): string => {
   if (!text) return "";
   return text
-    .replace(/\*\*(.+?)\*\*/gs, '$1')
-    .replace(/\*(.+?)\*/gs, '$1')
-    .replace(/#{1,6}\s+/g, '')
-    .replace(/`(.+?)`/gs, '$1')
-    .replace(/^\s*[-•]\s/gm, '· ');
+    .replace(/\*\*(.+?)\*\*/gs, "$1")
+    .replace(/\*(.+?)\*/gs, "$1")
+    .replace(/#{1,6}\s+/g, "")
+    .replace(/`(.+?)`/gs, "$1")
+    .replace(/^\s*[-•]\s/gm, "· ");
 };
+
+/**
+ * Parse an AI response that may contain automation action blocks.
+ * Expected format inside the AI reply:
+ *
+ *   [ACTION:click:0.5:0.3]
+ *   [ACTION:type:Hello world]
+ *   [ACTION:wait:500]
+ *   [ACTION:screenshot]
+ *
+ * Returns { actions, cleanText } where cleanText has action tags removed.
+ */
+const parseAutomationActions = (
+  text: string
+): { actions: AutomationAction[]; cleanText: string } => {
+  const actions: AutomationAction[] = [];
+  const actionRegex = /\[ACTION:([^\]]+)\]/g;
+  let match;
+
+  while ((match = actionRegex.exec(text)) !== null) {
+    const parts = match[1].split(":");
+    const type = parts[0] as AutomationAction["type"];
+
+    if (type === "click" && parts.length >= 3) {
+      actions.push({ type: "click", x: parseFloat(parts[1]), y: parseFloat(parts[2]) });
+    } else if (type === "type" && parts.length >= 2) {
+      // Rejoin in case text itself contains colons
+      actions.push({ type: "type", text: parts.slice(1).join(":") });
+    } else if (type === "wait" && parts.length >= 2) {
+      actions.push({ type: "wait", ms: parseInt(parts[1], 10) });
+    } else if (type === "screenshot") {
+      actions.push({ type: "screenshot" });
+    }
+  }
+
+  const cleanText = text.replace(actionRegex, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { actions, cleanText };
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isAutomating, setIsAutomating] = useState<boolean>(false);
+  const [automationStatus, setAutomationStatus] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [token, setToken] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -52,19 +104,22 @@ export default function App() {
 
   const handleDeepLink = (url: string) => {
     try {
-      console.log("handleDeepLink called with:", url);
       const parsed = new URL(url);
       const accessToken = parsed.searchParams.get("token");
       const refreshToken = parsed.searchParams.get("refresh");
-      console.log("accessToken:", accessToken ? "present" : "missing");
-      console.log("refreshToken:", refreshToken ? "present" : "missing");
       if (accessToken && refreshToken) {
-        supabase.auth.setSession({
-          access_token: decodeURIComponent(accessToken),
-          refresh_token: decodeURIComponent(refreshToken),
-        }).then(({ data, error }) => {
-          console.log("setSession:", data?.session ? "success" : "failed", error?.message ?? "");
-        });
+        supabase.auth
+          .setSession({
+            access_token: decodeURIComponent(accessToken),
+            refresh_token: decodeURIComponent(refreshToken),
+          })
+          .then(({ data, error }) => {
+            console.log(
+              "setSession:",
+              data?.session ? "success" : "failed",
+              error?.message ?? ""
+            );
+          });
       }
     } catch (e) {
       console.error("Deep link parse error:", e);
@@ -72,8 +127,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      console.log("onAuthStateChange fired, session:", session ? "present" : "null");
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.access_token) {
         tokenRef.current = session.access_token;
         setToken(session.access_token);
@@ -93,29 +149,75 @@ export default function App() {
 
   useEffect(() => {
     const unlisten = onOpenUrl((urls) => {
-      console.log("onOpenUrl received:", urls);
       handleDeepLink(urls[0]);
     });
 
     const unlistenTauri = listen("deep-link-received", (event) => {
-      console.log("deep-link-received event:", event.payload);
       handleDeepLink(event.payload as string);
     });
 
-    const unlistenFocus = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-      if (focused) {
-        setTimeout(() => {
-          invoke("reapply_stealth").catch(() => {});
-        }, 300);
+    const unlistenFocus = getCurrentWindow().onFocusChanged(
+      ({ payload: focused }) => {
+        if (focused) {
+          setTimeout(() => {
+            invoke("reapply_stealth").catch(() => {});
+          }, 300);
+        }
       }
-    });
+    );
 
     return () => {
-      unlisten.then(fn => fn());
-      unlistenTauri.then(fn => fn());
-      unlistenFocus.then(fn => fn());
+      unlisten.then((fn) => fn());
+      unlistenTauri.then((fn) => fn());
+      unlistenFocus.then((fn) => fn());
     };
   }, []);
+
+  /**
+   * Execute a sequence of parsed automation actions.
+   * Hides the overlay before acting, shows it after.
+   */
+  const runAutomationActions = async (
+    actions: AutomationAction[],
+    onScreenshot: (base64: string) => void
+  ) => {
+    if (actions.length === 0) return;
+
+    setIsAutomating(true);
+
+    // Hide overlay so it doesn't interfere with clicks
+    await invoke("hide_window").catch(() => {});
+    await sleep(150);
+
+    for (const action of actions) {
+      try {
+        if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
+          setAutomationStatus(`Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`);
+          await invoke("click_at", { x: action.x, y: action.y });
+          await sleep(80);
+        } else if (action.type === "type" && action.text) {
+          setAutomationStatus(`Typing: "${action.text.slice(0, 24)}${action.text.length > 24 ? "…" : ""}"`);
+          await invoke("type_text", { text: action.text });
+          await sleep(50);
+        } else if (action.type === "wait") {
+          const ms = action.ms ?? 500;
+          setAutomationStatus(`Waiting ${ms}ms…`);
+          await sleep(ms);
+        } else if (action.type === "screenshot") {
+          setAutomationStatus("Capturing screen…");
+          const base64 = await invoke<string>("capture_screen");
+          onScreenshot(base64);
+        }
+      } catch (err) {
+        console.error("Automation action failed:", action, err);
+      }
+    }
+
+    // Restore overlay
+    await invoke("show_window").catch(() => {});
+    setIsAutomating(false);
+    setAutomationStatus("");
+  };
 
   const handleUpgrade = async () => {
     const { data } = await supabase.auth.getUser();
@@ -136,7 +238,8 @@ export default function App() {
   };
 
   const scrollToBottom = () => {
-    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    if (bodyRef.current)
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   };
 
   const sendToServer = async (
@@ -157,16 +260,26 @@ export default function App() {
       const controller = new AbortController();
       const timeout = setTimeout(() => {
         controller.abort();
-        setMessages(prev => [...prev, { role: "ai", text: "Server is waking up — try again in 30 seconds." }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "Server is waking up — try again in 30 seconds.",
+          },
+        ]);
       }, 15000);
 
-      const body: Record<string, unknown> = { message: userText, history: updatedHistory };
+      const body: Record<string, unknown> = {
+        message: userText,
+        history: updatedHistory,
+      };
       if (base64Image) body.base64Image = base64Image;
 
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
-
-      console.log("Sending request, token:", tokenRef.current ? "present" : "missing");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (tokenRef.current)
+        headers["Authorization"] = `Bearer ${tokenRef.current}`;
 
       const res = await fetch(SERVER_URL, {
         method: "POST",
@@ -179,11 +292,7 @@ export default function App() {
       const data = await res.json();
 
       if (res.status === 429) {
-        setMessages(prev => [...prev, {
-          role: "ai",
-          text: "",
-          isLimit: true,
-        }]);
+        setMessages((prev) => [...prev, { role: "ai", text: "", isLimit: true }]);
         setIsLoading(false);
         return;
       }
@@ -197,41 +306,78 @@ export default function App() {
         return;
       }
 
-      const aiText = stripMarkdown(data.result || data.message || "No response received.");
-      setMessages(prev => [...prev, { role: "ai", text: aiText }]);
-      setHistory([...updatedHistory, { role: "assistant", content: aiText }]);
+      const rawText = data.result || data.message || "No response received.";
+      const { actions, cleanText } = parseAutomationActions(rawText);
+      const aiText = stripMarkdown(cleanText);
+
+      const hasActions = actions.length > 0;
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "ai", text: aiText, isAutomation: hasActions },
+      ]);
+      const newHistory: HistoryEntry[] = [
+        ...updatedHistory,
+        { role: "assistant", content: aiText },
+      ];
+      setHistory(newHistory);
+      setIsLoading(false);
+
+      // Run automation actions after updating UI
+      if (hasActions) {
+        await runAutomationActions(actions, async (screenshotBase64) => {
+          // If a screenshot action fires mid-sequence, feed it back as a follow-up
+          await sendToServer(
+            "[automated screenshot follow-up]",
+            screenshotBase64,
+            newHistory
+          );
+        });
+      }
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== "AbortError") {
-        setMessages(prev => [...prev, { role: "ai", text: "Error: " + String(err) }]);
+        setMessages((prev) => [
+          ...prev,
+          { role: "ai", text: "Error: " + String(err) },
+        ]);
       }
-    } finally {
       setIsLoading(false);
+    } finally {
       setTimeout(scrollToBottom, 50);
     }
   };
 
   const handleSubmit = async () => {
-    if (!message.trim() || isLoading) return;
+    if (!message.trim() || isLoading || isAutomating) return;
     const userText = message.trim();
     setMessage("");
-    setMessages(prev => [...prev, { role: "user", text: userText }]);
+    setMessages((prev) => [...prev, { role: "user", text: userText }]);
     await sendToServer(userText);
   };
 
   const handleCaptureWithMessage = async () => {
-    if (isLoading) return;
+    if (isLoading || isAutomating) return;
     const userText = message.trim();
     const screenBase64 = await invoke<string>("capture_screen");
     setMessage("");
-    setMessages(prev => [...prev, { role: "user", text: userText || "", screenshotOnly: !userText }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text: userText || "", screenshotOnly: !userText },
+    ]);
     await sendToServer(userText, screenBase64);
   };
 
-  const handleAskGroq = useCallback(async (base64Image: string, userMessage?: string) => {
-    const userText = userMessage?.trim() || "";
-    setMessages(prev => [...prev, { role: "user", text: userText || "", screenshotOnly: !userText }]);
-    await sendToServer(userText, base64Image, history);
-  }, [history]);
+  const handleAskGroq = useCallback(
+    async (base64Image: string, userMessage?: string) => {
+      const userText = userMessage?.trim() || "";
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text: userText || "", screenshotOnly: !userText },
+      ]);
+      await sendToServer(userText, base64Image, history);
+    },
+    [history]
+  );
 
   useEffect(() => {
     const shortcuts: string[] = [
@@ -246,151 +392,295 @@ export default function App() {
 
     const setupShortcuts = async () => {
       for (const s of shortcuts) {
-        try { await unregister(s); } catch (_) {}
+        try {
+          await unregister(s);
+        } catch (_) {}
       }
+
       await register("CommandOrControl+Shift+G", async () => {
         const screenBase64 = await invoke<string>("capture_screen");
         handleAskGroq(screenBase64, message);
         setMessage("");
       });
+
       await register("CommandOrControl+B", async () => {
         await invoke("show_window");
         await getCurrentWindow().setFocus();
       });
+
       await register("Control+H", async () => {
         await invoke("hide_window");
       });
+
       const STEP = 40;
       await register("Control+Left", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({ type: "Physical", x: pos.x - STEP, y: pos.y } as any);
+        await win.setPosition({
+          type: "Physical",
+          x: pos.x - STEP,
+          y: pos.y,
+        } as any);
       });
       await register("Control+Right", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({ type: "Physical", x: pos.x + STEP, y: pos.y } as any);
+        await win.setPosition({
+          type: "Physical",
+          x: pos.x + STEP,
+          y: pos.y,
+        } as any);
       });
       await register("Control+Up", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({ type: "Physical", x: pos.x, y: pos.y - STEP } as any);
+        await win.setPosition({
+          type: "Physical",
+          x: pos.x,
+          y: pos.y - STEP,
+        } as any);
       });
       await register("Control+Down", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({ type: "Physical", x: pos.x, y: pos.y + STEP } as any);
+        await win.setPosition({
+          type: "Physical",
+          x: pos.x,
+          y: pos.y + STEP,
+        } as any);
       });
     };
 
     setupShortcuts();
-    return () => { shortcuts.forEach(s => unregister(s)); };
+    return () => {
+      shortcuts.forEach((s) => unregister(s));
+    };
   }, [handleAskGroq, message]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
   };
 
   const copyLastResponse = () => {
-    const lastAi = [...messages].reverse().find(m => m.role === "ai" && !m.isLimit);
+    const lastAi = [...messages]
+      .reverse()
+      .find((m) => m.role === "ai" && !m.isLimit);
     if (lastAi) navigator.clipboard.writeText(lastAi.text);
   };
 
-  const clearConversation = () => { setMessages([]); setHistory([]); };
+  const clearConversation = () => {
+    setMessages([]);
+    setHistory([]);
+  };
 
-  const isLimitReached = messages.length > 0 && messages[messages.length - 1].isLimit;
+  const isLimitReached =
+    messages.length > 0 && messages[messages.length - 1].isLimit;
+  const isBlocked = isLoading || isAutomating;
 
   return (
     <div className="hud-root">
       <div className="hud-panel">
+        {/* ── Header ── */}
         <div className="hud-header" data-tauri-drag-region>
-          <span className="hud-title" data-tauri-drag-region>agrade</span>
+          <span className="hud-title" data-tauri-drag-region>
+            agrade
+          </span>
           <div className="hud-header-actions">
             {messages.length > 0 && !isLimitReached && (
               <>
-                <button className="hud-action-btn" onClick={copyLastResponse} title="Copy last response">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2"/>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                <button
+                  className="hud-action-btn"
+                  onClick={copyLastResponse}
+                  title="Copy last response"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="9" y="9" width="13" height="13" rx="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                   </svg>
                 </button>
-                <button className="hud-action-btn" onClick={clearConversation} title="Clear conversation">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="3 6 5 6 21 6"/>
-                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                    <path d="M10 11v6"/><path d="M14 11v6"/>
+                <button
+                  className="hud-action-btn"
+                  onClick={clearConversation}
+                  title="Clear conversation"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
                   </svg>
                 </button>
               </>
             )}
-            <button className="hud-action-btn" onClick={handleSignOut} title="Sign out">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
+            <button
+              className="hud-action-btn"
+              onClick={handleSignOut}
+              title="Sign out"
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
               </svg>
             </button>
-            <div className={`hud-status ${isLoading ? "active" : ""}`} />
+            <div className={`hud-status ${isBlocked ? "active" : ""}`} />
           </div>
         </div>
+
+        {/* ── Body ── */}
         <div className="hud-body" ref={bodyRef}>
           <div className="hud-messages">
-            {messages.map((msg, i) => (
+            {messages.map((msg, i) =>
               msg.role === "user" ? (
                 <div key={i} className="hud-bubble-row user">
                   <div className="hud-bubble user">
                     {msg.screenshotOnly ? (
                       <div className="hud-screenshot-tag">
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                          <circle cx="12" cy="13" r="4"/>
+                        <svg
+                          width="11"
+                          height="11"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                          <circle cx="12" cy="13" r="4" />
                         </svg>
                         Screenshot captured
                       </div>
-                    ) : msg.text}
+                    ) : (
+                      msg.text
+                    )}
                   </div>
                 </div>
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
-                  <p className="hud-limit-text">You've used your 5 free messages</p>
+                  <p className="hud-limit-text">
+                    You've used your 5 free messages
+                  </p>
                   <button className="hud-upgrade-btn" onClick={handleUpgrade}>
                     Upgrade to Pro
                   </button>
                 </div>
               ) : (
-                <div key={i} className="hud-ai-response">{msg.text}</div>
+                <div
+                  key={i}
+                  className={`hud-ai-response${msg.isAutomation ? " hud-ai-automation" : ""}`}
+                >
+                  {msg.isAutomation && (
+                    <span className="hud-automation-badge">
+                      ⚡ automated
+                    </span>
+                  )}
+                  {msg.text}
+                </div>
               )
-            ))}
+            )}
+
+            {/* Loading indicator */}
             {isLoading && (
               <div className="hud-thinking">
-                <span /><span /><span />
+                <span />
+                <span />
+                <span />
+              </div>
+            )}
+
+            {/* Automation status indicator */}
+            {isAutomating && (
+              <div className="hud-automation-status">
+                <span className="hud-automation-spinner" />
+                {automationStatus || "Automating…"}
               </div>
             )}
           </div>
         </div>
+
+        {/* ── Footer ── */}
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
-              <button className="hud-icon-btn" onClick={handleCaptureWithMessage} disabled={isLoading} title="Capture screen">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                  <circle cx="12" cy="13" r="4"/>
+              <button
+                className="hud-icon-btn"
+                onClick={handleCaptureWithMessage}
+                disabled={isBlocked}
+                title="Capture screen"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                  <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
               <div className="hud-input-row">
                 <textarea
                   ref={inputRef}
                   className="hud-input"
-                  placeholder="Ask anything about screen or conversation..."
+                  placeholder={
+                    isAutomating
+                      ? automationStatus || "Automating…"
+                      : "Ask anything about screen or conversation..."
+                  }
                   value={message}
-                  onChange={e => setMessage(e.target.value)}
+                  onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
                   rows={1}
-                  disabled={isLoading}
+                  disabled={isBlocked}
                 />
-                <button className="hud-send-btn" onClick={handleSubmit} disabled={isLoading || !message.trim()} title="Send">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M2 21l21-9L2 3v7l15 2-15 2z"/>
+                <button
+                  className="hud-send-btn"
+                  onClick={handleSubmit}
+                  disabled={isBlocked || !message.trim()}
+                  title="Send"
+                >
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
                   </svg>
                 </button>
               </div>
