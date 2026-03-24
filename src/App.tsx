@@ -431,66 +431,29 @@ export default function App() {
     text: string
   ): Promise<{ x: number; y: number; found: boolean }> => {
     try {
-      const compact = text.replace(/\s+/g, " ").trim();
-      const words = compact.split(" ").filter(Boolean);
-      const shortPhrase = words.slice(0, 8).join(" ");
-      const anchorPhrase =
-        words.length > 14 ? `${words.slice(0, 4).join(" ")} ... ${words.slice(-4).join(" ")}` : compact;
+      const isLongOption = text.length > 30;
+      const searchInstruction = isLongOption
+        ? `A Coursera quiz is visible. Find the radio button (○ circle) next to the option that says "${text.slice(0, 60)}". Click the radio button circle itself, not the text. Emit ONLY one [ACTION:click:X:Y] tag for the radio button center.`
+        : `Find the clickable answer option "${text}" on screen and click its center. Emit ONLY one [ACTION:click:X:Y] tag.`;
 
-      const prompts = [
-        `Find the quiz answer option text "${compact}" on the browser page and click its center. Ignore app overlays, IDE/editor text, taskbar, and system UI. Emit ONLY one [ACTION:click:X:Y] tag. If not found, emit nothing.`,
-        `Find and click the answer option that BEST MATCHES this phrase: "${shortPhrase}". The full option may be longer/truncated. Ignore app overlays and non-browser UI. Emit ONLY one [ACTION:click:X:Y] tag.`,
-        `Find and click the quiz option semantically matching: "${anchorPhrase}". Do not click chrome tabs, address bar, close buttons, taskbar, or this app. Emit ONLY one [ACTION:click:X:Y] tag.`,
-        `A quiz is visible in the browser. Click the option whose meaning best matches this correct answer: "${compact}". The text on screen may be wrapped, shortened, or partially hidden. Click only inside the quiz options area (not tabs, address bar, window controls, taskbar, or this app). Emit ONLY one [ACTION:click:X:Y] tag.`,
-      ];
-
-      for (const message of prompts) {
-        const res = await fetch(SERVER_URL, {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            base64Image,
-            message,
-            history: [],
-          }),
-        });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const rawText = String(data?.result || "");
-        const { actions } = parseAutomationActions(rawText);
-        const clickAction = actions.find((a) => a.type === "click");
-        if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
-          if (!isSafeClickPoint(clickAction.x, clickAction.y)) continue;
-          return { x: clickAction.x, y: clickAction.y, found: true };
-        }
-      }
-
-      // Final fallback: center-mass guess inside typical options region.
-      const finalRes = await fetch(SERVER_URL, {
+      const res = await fetch(SERVER_URL, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
           base64Image,
-          message:
-            `Return ONLY JSON: {"x":0-1,"y":0-1}. Pick the center of the most likely answer option matching: "${shortPhrase}". ` +
-            `Constrain x between 0.12 and 0.88 and y between 0.25 and 0.86.`,
+          message: searchInstruction,
           history: [],
         }),
       });
-      if (finalRes.ok) {
-        const finalData = await finalRes.json();
-        const raw = String(finalData?.result || "").replace(/```json|```/g, "").trim();
-        try {
-          const parsed = JSON.parse(raw);
-          if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
-            const x = Math.max(0.12, Math.min(0.88, parsed.x));
-            const y = Math.max(0.25, Math.min(0.86, parsed.y));
-            if (isSafeClickPoint(x, y)) {
-              return { x, y, found: true };
-            }
+
+      if (res.ok) {
+        const data = await res.json();
+        const { actions } = parseAutomationActions(String(data?.result || ""));
+        const clickAction = actions.find((a) => a.type === "click");
+        if (clickAction?.x !== undefined && clickAction?.y !== undefined) {
+          if (isSafeClickPoint(clickAction.x, clickAction.y)) {
+            return { x: clickAction.x, y: clickAction.y, found: true };
           }
-        } catch {
-          // ignore and fall through
         }
       }
 
@@ -637,14 +600,17 @@ export default function App() {
       }]);
 
       if (analysis.type === "multiple_choice") {
-        setAutomationStatus(
-          analysis.option_index
-            ? `Locating option #${analysis.option_index}...`
-            : `Locating "${analysis.answer}"...`
-        );
-        const location = analysis.option_index
-          ? await locateOptionByIndex(screenBase64, analysis.option_index)
-          : await locateOnScreen(screenBase64, analysis.answer);
+        let location = { x: 0.5, y: 0.5, found: false };
+
+        if (analysis.option_index) {
+          setAutomationStatus(`Locating option #${analysis.option_index}...`);
+          location = await locateOptionByIndex(screenBase64, analysis.option_index);
+        }
+
+        if (!location.found) {
+          setAutomationStatus("Locating by text...");
+          location = await locateOnScreen(screenBase64, analysis.answer);
+        }
         console.log("Location:", location);
 
         if (location.found) {
@@ -658,14 +624,14 @@ export default function App() {
           }
           await invoke("hide_window").catch(() => {});
           await sleep(150);
-          setAutomationStatus(`Clicking "${analysis.answer}"…`);
+          setAutomationStatus("Clicking option...");
           await invoke("click_at", { x: location.x, y: location.y });
           await sleep(800);
           await invoke("show_window").catch(() => {});
         } else {
           setMessages((prev) => [...prev, {
             role: "ai",
-            text: `Could not locate "${analysis.answer}" on screen.`,
+            text: "Could not locate option on screen.",
             isAutomation: true,
           }]);
           consecutiveFailures++;
