@@ -91,8 +91,7 @@ export default function App() {
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
-    if (bodyRef.current)
-      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   };
 
   const authHeaders = (): Record<string, string> => {
@@ -112,7 +111,7 @@ export default function App() {
 
   const isSafeClickPoint = (x: number, y: number): boolean => {
     if (x < 0.04 || x > 0.96) return false;
-    if (y < 0.10 || y > 0.93) return false;
+    if (y < 0.15 || y > 0.93) return false;
     if (x > 0.82 && y < 0.06) return false;
     return true;
   };
@@ -180,7 +179,6 @@ export default function App() {
     open(LOGIN_URL);
   };
 
-  // ── Core fetch ─────────────────────────────────────────────────────────────
   const fetchFromServer = async (
     userText: string,
     base64Image: string | undefined,
@@ -230,7 +228,6 @@ export default function App() {
     }
   };
 
-  // ── JSON parser for /analyze responses ────────────────────────────────────
   const parseAnalyzeJson = (raw: string): {
     answer: string;
     type: "multiple_choice" | "text_input";
@@ -245,7 +242,7 @@ export default function App() {
         answer: String(r.answer),
         type: r.type === "text_input" ? "text_input" as const : "multiple_choice" as const,
         confidence: typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6,
-        option_index: typeof r.option_index === "number" && [1,2,3,4].includes(r.option_index)
+        option_index: typeof r.option_index === "number" && [1, 2, 3, 4].includes(r.option_index)
           ? r.option_index : null,
       };
     };
@@ -283,7 +280,6 @@ export default function App() {
     } catch { return null; }
   };
 
-  // ── Analyze screen ─────────────────────────────────────────────────────────
   const analyzeScreen = async (base64Image: string): Promise<{
     analysis: {
       answer: string;
@@ -297,7 +293,6 @@ export default function App() {
       if (!base64Image || base64Image.length < 100)
         return { analysis: null, reason: "Screenshot empty." };
 
-      // Primary: /analyze endpoint
       for (let attempt = 1; attempt <= 2; attempt++) {
         const res = await fetch(ANALYZE_URL, {
           method: "POST",
@@ -313,7 +308,7 @@ export default function App() {
               type: data.type === "text_input" ? "text_input" : "multiple_choice",
               confidence: typeof data.confidence === "number"
                 ? Math.max(0, Math.min(1, data.confidence)) : 0.7,
-              option_index: typeof data.option_index === "number" && [1,2,3,4].includes(data.option_index)
+              option_index: typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
                 ? data.option_index : null,
             },
           };
@@ -321,7 +316,6 @@ export default function App() {
         await sleep(300);
       }
 
-      // Fallback: /ask with strict JSON prompt
       const fallbackRes = await fetch(SERVER_URL, {
         method: "POST",
         headers: authHeaders(),
@@ -332,8 +326,7 @@ export default function App() {
         }),
       });
 
-      if (!fallbackRes.ok)
-        return { analysis: null, reason: `Fallback error ${fallbackRes.status}` };
+      if (!fallbackRes.ok) return { analysis: null, reason: `Fallback error ${fallbackRes.status}` };
 
       const fallbackData = await fallbackRes.json();
       const parsed = parseAnalyzeJson(String(fallbackData?.result || ""));
@@ -344,7 +337,6 @@ export default function App() {
     }
   };
 
-  // ── Click option by pixel scanning ────────────────────────────────────────
   const clickOptionByIndex = async (
     base64Image: string,
     optionIndex: number
@@ -355,14 +347,9 @@ export default function App() {
         { base64Image, maxOptions: 8 }
       );
 
-      console.log(`Pixel scan found ${positions.length} buttons:`,
-        positions.map(p => `(${Math.round(p[0]*100)}%,${Math.round(p[1]*100)}%)`).join(" ")
-      );
-
-      // Show debug info in chat during testing
       setMessages(prev => [...prev, {
         role: "ai",
-        text: `Detected ${positions.length} option button(s): ${positions.map(p => `(${Math.round(p[0]*100)}%,${Math.round(p[1]*100)}%)`).join(" ")} — targeting #${optionIndex}`,
+        text: `Detected ${positions.length} option(s): ${positions.map(p => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`).join(" ")} — targeting #${optionIndex}`,
         isAutomation: true,
       }]);
 
@@ -379,9 +366,9 @@ export default function App() {
 
       await invoke("hide_window").catch(() => {});
       await sleep(150);
-      setAutomationStatus(`Clicking option ${optionIndex} at (${Math.round(target[0]*100)}%, ${Math.round(target[1]*100)}%)…`);
+      setAutomationStatus(`Clicking option ${optionIndex}…`);
       await invoke("click_at", { x: target[0], y: target[1] });
-      await sleep(800);
+      await sleep(1200);
       await invoke("show_window").catch(() => {});
       return true;
     } catch (err) {
@@ -390,11 +377,9 @@ export default function App() {
     }
   };
 
-  // ── Execute manual action tags (from /ask responses) ──────────────────────
   const executeActions = async (actions: AutomationAction[]): Promise<void> => {
     await invoke("hide_window").catch(() => {});
     await sleep(150);
-
     for (const action of actions) {
       try {
         if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
@@ -413,17 +398,14 @@ export default function App() {
         console.error("Action failed:", action, err);
       }
     }
-
     await sleep(400);
     await invoke("show_window").catch(() => {});
   };
 
-  // ── Auto-answer loop ───────────────────────────────────────────────────────
   const handleAutoAnswer = async () => {
     if (isLoading || isAutomating) return;
     stopAutomationRef.current = false;
     setIsAutomating(true);
-
     setMessages(prev => [...prev, { role: "user", text: "Auto-answering quiz…" }]);
 
     let round = 0;
@@ -455,7 +437,7 @@ export default function App() {
       if (!analysis.answer || analysis.confidence < 0.35) {
         setMessages(prev => [...prev, {
           role: "ai",
-          text: "No quiz question detected on screen. Stopping.",
+          text: "No quiz question detected. Stopping.",
           isAutomation: true,
         }]);
         break;
@@ -463,7 +445,6 @@ export default function App() {
 
       consecutiveFailures = 0;
 
-      // Show answer in chat
       setMessages(prev => [...prev, {
         role: "ai",
         text: `Answer: ${analysis.answer}${analysis.option_index ? ` (option ${analysis.option_index})` : ""}`,
@@ -473,13 +454,11 @@ export default function App() {
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
         setAutomationStatus(`Locating option ${idx}…`);
-
         const clicked = await clickOptionByIndex(screenBase64, idx);
-
         if (!clicked) {
           setMessages(prev => [...prev, {
             role: "ai",
-            text: `Could not find option ${idx} via pixel scan. Skipping.`,
+            text: `Could not find option ${idx}. Skipping.`,
             isAutomation: true,
           }]);
           consecutiveFailures++;
@@ -487,10 +466,9 @@ export default function App() {
           continue;
         }
       } else {
-        // Text input
         await invoke("hide_window").catch(() => {});
         await sleep(150);
-        setAutomationStatus(`Typing "${analysis.answer}"…`);
+        setAutomationStatus(`Typing answer…`);
         await invoke("click_at", { x: 0.5, y: 0.55 });
         await sleep(200);
         await invoke("type_text", { text: analysis.answer });
@@ -502,30 +480,47 @@ export default function App() {
 
       if (stopAutomationRef.current) break;
 
-      // Completion check
+      // Progress check
       setAutomationStatus(`Round ${round} — checking progress…`);
       const afterScreen = await captureQuizScreenshot();
-      const checkResult = await fetchFromServer(
-        "[AUTO] Is this quiz fully complete with no more unanswered questions visible? Reply YES or NO only.",
+
+      const progressRes = await fetchFromServer(
+        "[AUTO] Look at this screen carefully. Reply with exactly one of these words only: NEXT_BUTTON if there is a visible Next or Continue button to click to proceed, QUESTION_CHANGED if the question has changed to a new unanswered question, SAME_QUESTION if the same question is still showing unanswered, QUIZ_COMPLETE if there are no more questions and the quiz appears finished.",
         afterScreen,
         []
       );
 
-      const checkText = (checkResult?.rawText || "").trim().toUpperCase();
-      console.log("Completion check:", checkText);
+      const progressText = (progressRes?.rawText || "").trim().toUpperCase();
+      console.log("Progress check:", progressText);
 
-      if (checkText.startsWith("YES")) {
-        setMessages(prev => [...prev, {
-          role: "ai", text: "✓ Task complete.", isAutomation: true,
-        }]);
+      if (progressText.includes("QUIZ_COMPLETE")) {
+        setMessages(prev => [...prev, { role: "ai", text: "✓ Task complete.", isAutomation: true }]);
         break;
+      }
+
+      if (progressText.includes("NEXT_BUTTON")) {
+        await invoke("hide_window").catch(() => {});
+        await sleep(150);
+        await invoke("click_at", { x: 0.85, y: 0.88 });
+        await sleep(1000);
+        await invoke("show_window").catch(() => {});
+        setAutomationStatus(`Clicked Next — loading next question…`);
+        await sleep(500);
+      }
+
+      if (progressText.includes("SAME_QUESTION")) {
+        consecutiveFailures++;
+        setMessages(prev => [...prev, {
+          role: "ai",
+          text: `Round ${round}: Answer did not register, retrying…`,
+          isAutomation: true,
+        }]);
       }
 
       await sleep(300);
       setTimeout(scrollToBottom, 50);
     }
 
-    // End messages
     if (stopAutomationRef.current) {
       setMessages(prev => [...prev, { role: "ai", text: "Automation stopped.", isAutomation: true }]);
     } else if (consecutiveFailures >= 3) {
@@ -554,7 +549,6 @@ export default function App() {
     setAutomationStatus("Stopping…");
   };
 
-  // ── Normal send ────────────────────────────────────────────────────────────
   const sendToServer = async (
     userText: string,
     base64Image?: string,
@@ -625,7 +619,6 @@ export default function App() {
 
     const setupShortcuts = async () => {
       for (const s of shortcuts) { try { await unregister(s); } catch (_) {} }
-
       await register("CommandOrControl+Shift+G", async () => {
         const screenBase64 = await invoke<string>("capture_screen");
         handleAskGroq(screenBase64, message);
@@ -636,7 +629,6 @@ export default function App() {
         await getCurrentWindow().setFocus();
       });
       await register("Control+H", async () => { await invoke("hide_window"); });
-
       const STEP = 40;
       await register("Control+Left", async () => {
         const win = getCurrentWindow(); const pos = await win.outerPosition();
@@ -677,8 +669,6 @@ export default function App() {
   return (
     <div className="hud-root">
       <div className="hud-panel">
-
-        {/* ── Header ── */}
         <div className="hud-header" data-tauri-drag-region>
           <span className="hud-title" data-tauri-drag-region>agrade</span>
           <div className="hud-header-actions">
@@ -710,7 +700,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Body ── */}
         <div className="hud-body" ref={bodyRef}>
           <div className="hud-messages">
             {messages.map((msg, i) =>
@@ -750,7 +739,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Footer ── */}
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
