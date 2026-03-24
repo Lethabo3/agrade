@@ -47,8 +47,9 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoCreateInstance,
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    VARIANT,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Variant::VARIANT;
 #[cfg(target_os = "windows")]
 use windows::core::Interface;
 #[cfg(target_os = "windows")]
