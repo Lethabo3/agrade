@@ -367,28 +367,45 @@ export default function App() {
     }
   };
 
+  // ------------------------------------------------------------------
+  // clickOptionByIndex — tries UIA radio button detection first,
+  // falls back to existing pixel-scan path if UIA returns nothing.
+  // ------------------------------------------------------------------
   const clickOptionByIndex = async (
     base64Image: string,
     optionIndex: number
   ): Promise<boolean> => {
     try {
-      const rawPositions = await invoke<[number, number][]>("find_option_positions", {
-        base64Image,
-        maxOptions: 4,
-      });
+      // --- Pass 1: UIA (preferred) ---
+      let uiaPositions: [number, number][] = [];
+      try {
+        uiaPositions = await invoke<[number, number][]>("find_radio_buttons_uia");
+      } catch {
+        // UIA command not available (e.g. non-Windows build) — proceed to pixel scan
+      }
+
+      // --- Pass 2: pixel scan fallback ---
+      const rawPositions: [number, number][] =
+        uiaPositions.length > 0
+          ? uiaPositions
+          : await invoke<[number, number][]>("find_option_positions", {
+              base64Image,
+              maxOptions: 4,
+            });
 
       // Remove positions clustered too tightly on the y-axis (likely mis-detections)
       const positions = rawPositions.filter((pos, i) =>
         i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
       );
 
+      const source = uiaPositions.length > 0 ? "UIA" : "pixel";
       setMessages((prev) => [
         ...prev,
         {
           role: "ai",
-          text: `Detected ${positions.length} option(s): ${positions
+          text: `[${source}] Detected ${positions.length} option(s): ${positions
             .map((p) => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`)
-            .join(" ")} - targeting #${optionIndex}`,
+            .join(" ")} — targeting #${optionIndex}`,
           isAutomation: true,
         },
       ]);
@@ -407,7 +424,6 @@ export default function App() {
       await invoke("hide_window").catch(() => {});
       await sleep(150);
       setAutomationStatus(`Clicking option ${optionIndex}...`);
-      // Click the detected center directly — circle detection already gives us the true center
       await invoke("click_at", { x: target[0], y: target[1] });
       await sleep(1200);
       await invoke("show_window").catch(() => {});
@@ -561,12 +577,34 @@ export default function App() {
 
       if (stopAutomationRef.current) break;
 
-      // After every successful answer attempt, advance to the next question blindly.
-      // The next round's analyzeScreen will confirm whether the page moved forward.
-      setAutomationStatus("Advancing to next question...");
+      // ----------------------------------------------------------------
+      // Advance to the next question.
+      // UIA finds the real Next/Submit button by accessible name.
+      // Falls back to the hardcoded coordinate if UIA finds nothing.
+      // ----------------------------------------------------------------
+      setAutomationStatus("Finding Next button...");
       await invoke("hide_window").catch(() => {});
-      await sleep(800);
-      await invoke("click_at", { x: 0.85, y: 0.88 });
+      await sleep(300);
+
+      let foundNext = false;
+      try {
+        foundNext = await invoke<boolean>("click_next_button_uia");
+      } catch {
+        // command not available on this build
+      }
+
+      if (!foundNext) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "UIA Next not found — falling back to coordinate click.",
+            isAutomation: true,
+          },
+        ]);
+        await invoke("click_at", { x: 0.85, y: 0.88 });
+      }
+
       await sleep(1000);
       await invoke("show_window").catch(() => {});
 
