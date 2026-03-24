@@ -209,12 +209,9 @@ fn click_at(x: f64, y: f64) -> Result<(), String> {
                 r#type: INPUT_MOUSE,
                 Anonymous: INPUT_0 {
                     mi: MOUSEINPUT {
-                        dx: abs_x,
-                        dy: abs_y,
-                        mouseData: 0,
+                        dx: abs_x, dy: abs_y, mouseData: 0,
                         dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-                        time: 0,
-                        dwExtraInfo: 0,
+                        time: 0, dwExtraInfo: 0,
                     },
                 },
             };
@@ -261,12 +258,10 @@ fn scroll_down(amount: i32) -> Result<(), String> {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
+                    dx: 0, dy: 0,
                     mouseData: ((-120_i32).wrapping_mul(amount)) as u32,
                     dwFlags: MOUSEEVENTF_WHEEL,
-                    time: 0,
-                    dwExtraInfo: 0,
+                    time: 0, dwExtraInfo: 0,
                 },
             },
         };
@@ -301,9 +296,68 @@ fn type_text(text: String) -> Result<(), String> {
     Ok(())
 }
 
+// Returns true if the pixel at (cx, cy) appears to be the center of a radio button,
+// by checking for a lighter center surrounded by a darker ring at the given radius.
+fn is_radio_button_center(
+    img: &image::DynamicImage,
+    cx: u32,
+    cy: u32,
+    width: u32,
+    height: u32,
+    radius: u32,
+) -> bool {
+    use image::{GenericImageView, Rgba};
+
+    let margin = radius + 3;
+    if cx < margin || cy < margin || cx + margin >= width || cy + margin >= height {
+        return false;
+    }
+
+    let Rgba([cr, cg, cb, ca]) = img.get_pixel(cx, cy);
+    if ca < 200 { return false; }
+    let center_brightness = cr as u32 + cg as u32 + cb as u32;
+    if center_brightness < 540 { return false; }
+
+    let compass: [(f64, f64); 8] = [
+        (1.0, 0.0), (0.707, 0.707), (0.0, 1.0), (-0.707, 0.707),
+        (-1.0, 0.0), (-0.707, -0.707), (0.0, -1.0), (0.707, -0.707),
+    ];
+
+    let mut border_hits = 0u32;
+    let mut outer_hits = 0u32;
+
+    for (dx, dy) in &compass {
+        let rx = (cx as f64 + radius as f64 * dx).round() as u32;
+        let ry = (cy as f64 + radius as f64 * dy).round() as u32;
+        if rx >= width || ry >= height { continue; }
+
+        let Rgba([r, g, b, a]) = img.get_pixel(rx, ry);
+        if a < 200 { continue; }
+        let ring_brightness = r as u32 + g as u32 + b as u32;
+
+        if ring_brightness < center_brightness.saturating_sub(80)
+            && ring_brightness < 520
+            && (r as i32 - b as i32).abs() < 60
+        {
+            border_hits += 1;
+        }
+
+        let ox = (cx as f64 + (radius as f64 + 3.0) * dx).round() as u32;
+        let oy = (cy as f64 + (radius as f64 + 3.0) * dy).round() as u32;
+        if ox < width && oy < height {
+            let Rgba([or, og, ob, _]) = img.get_pixel(ox, oy);
+            if (or as u32 + og as u32 + ob as u32) > ring_brightness + 40 {
+                outer_hits += 1;
+            }
+        }
+    }
+
+    border_hits >= 5 && outer_hits >= 4
+}
+
 #[tauri::command]
 fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, f64)> {
-    use image::{GenericImageView, Rgba};
+    use image::GenericImageView;
 
     let bytes = match general_purpose::STANDARD.decode(&base64_image) {
         Ok(b) => b,
@@ -317,83 +371,46 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
     let (width, height) = img.dimensions();
     let mut found: Vec<(f64, f64)> = Vec::new();
 
-    let scan_x_max = (width as f32 * 0.12) as u32;
-    let scan_y_min = (height as f32 * 0.20) as u32;
-    let scan_y_max = (height as f32 * 0.85) as u32;
-    let mut last_found_y: i32 = -50;
+    let scan_x_max = (width as f32 * 0.25) as u32;
+    let scan_y_min = (height as f32 * 0.18) as u32;
+    let scan_y_max = (height as f32 * 0.88) as u32;
+    let min_y_gap_px = (height as f32 * 0.04) as i32;
+    let mut last_found_y: i32 = -(min_y_gap_px * 2);
 
-    // Pass 1: medium-grey border
-    for y in scan_y_min..scan_y_max {
-        if (y as i32) - last_found_y < 40 { continue; }
-        for x in 4..scan_x_max {
-            let Rgba([r, g, b, a]) = img.get_pixel(x, y);
-            if a < 200 { continue; }
-            let brightness = r as u32 + g as u32 + b as u32;
-            let is_grey_border = brightness > 390 && brightness < 630
-                && (r as i32 - b as i32).abs() < 35
-                && (r as i32 - g as i32).abs() < 35
-                && r > 120 && r < 220;
-            if !is_grey_border { continue; }
-            let check_x = x + 6;
-            if check_x >= width { continue; }
-            let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
-            if (cr as u32 + cg as u32 + cb as u32) < 600 { continue; }
-            if y < 4 || y + 4 >= height { continue; }
-            let Rgba([ar, ag, ab, _]) = img.get_pixel(check_x, y - 4);
-            let Rgba([br2, bg2, bb2, _]) = img.get_pixel(check_x, y + 4);
-            if (ar as u32 + ag as u32 + ab as u32) < 500 { continue; }
-            if (br2 as u32 + bg2 as u32 + bb2 as u32) < 500 { continue; }
-            last_found_y = y as i32;
-            found.push((x as f64 / width as f64, y as f64 / height as f64));
-            if found.len() >= max_options { return found; }
-            break;
-        }
-    }
-
-    // Pass 2: dark border fallback
-    if found.is_empty() {
-        last_found_y = -50;
-        for y in scan_y_min..scan_y_max {
-            if (y as i32) - last_found_y < 40 { continue; }
-            for x in 4..scan_x_max {
-                let Rgba([r, g, b, a]) = img.get_pixel(x, y);
-                if a < 200 { continue; }
-                let brightness = r as u32 + g as u32 + b as u32;
-                if brightness < 80 || brightness > 300 { continue; }
-                if (r as i32 - b as i32).abs() > 40 { continue; }
-                let check_x = x + 5;
-                if check_x >= width { continue; }
-                let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
-                if (cr as u32 + cg as u32 + cb as u32) < 550 { continue; }
-                last_found_y = y as i32;
-                found.push((x as f64 / width as f64, y as f64 / height as f64));
-                if found.len() >= max_options { return found; }
-                break;
+    // Pass 1: circle detection — scan for radio button centers at radii 6–9px
+    for y in (scan_y_min..scan_y_max).step_by(2) {
+        if (y as i32) - last_found_y < min_y_gap_px { continue; }
+        'x_loop: for x in 8..scan_x_max {
+            for radius in [7u32, 8, 6, 9] {
+                if is_radio_button_center(&img, x, y, width, height, radius) {
+                    last_found_y = y as i32;
+                    found.push((x as f64 / width as f64, y as f64 / height as f64));
+                    if found.len() >= max_options { return found; }
+                    break 'x_loop;
+                }
             }
         }
     }
 
-    // Pass 3: wider scan
+    // Pass 2: border fallback if circle detection found nothing
     if found.is_empty() {
-        let scan_x_max_wide = (width as f32 * 0.25) as u32;
-        last_found_y = -50;
+        last_found_y = -(min_y_gap_px * 2);
         for y in scan_y_min..scan_y_max {
-            if (y as i32) - last_found_y < 40 { continue; }
-            for x in 4..scan_x_max_wide {
+            if (y as i32) - last_found_y < min_y_gap_px { continue; }
+            for x in 4..scan_x_max {
+                use image::{GenericImageView, Rgba};
                 let Rgba([r, g, b, a]) = img.get_pixel(x, y);
                 if a < 200 { continue; }
                 let brightness = r as u32 + g as u32 + b as u32;
-                if brightness < 300 || brightness > 700 { continue; }
-                if (r as i32 - b as i32).abs() > 50 { continue; }
+                let is_grey = brightness > 390 && brightness < 630
+                    && (r as i32 - b as i32).abs() < 35
+                    && (r as i32 - g as i32).abs() < 35
+                    && r > 120 && r < 220;
+                if !is_grey { continue; }
                 let check_x = x + 6;
                 if check_x >= width { continue; }
                 let Rgba([cr, cg, cb, _]) = img.get_pixel(check_x, y);
-                if (cr as u32 + cg as u32 + cb as u32) < 550 { continue; }
-                if y < 4 || y + 4 >= height { continue; }
-                let Rgba([ar, ag, ab, _]) = img.get_pixel(check_x, y - 4);
-                let Rgba([br2, bg2, bb2, _]) = img.get_pixel(check_x, y + 4);
-                if (ar as u32 + ag as u32 + ab as u32) < 480 { continue; }
-                if (br2 as u32 + bg2 as u32 + bb2 as u32) < 480 { continue; }
+                if (cr as u32 + cg as u32 + cb as u32) < 600 { continue; }
                 last_found_y = y as i32;
                 found.push((x as f64 / width as f64, y as f64 / height as f64));
                 if found.len() >= max_options { return found; }
