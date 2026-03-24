@@ -222,16 +222,72 @@ export default function App() {
   const parseAnalyzeJson = (
     raw: string
   ): { answer: string; type: "multiple_choice" | "text_input"; confidence: number } | null => {
+    const normalize = (
+      value: unknown
+    ): { answer: string; type: "multiple_choice" | "text_input"; confidence: number } | null => {
+      if (!value || typeof value !== "object") return null;
+      const record = value as Record<string, unknown>;
+      if (!record.answer || !record.type) return null;
+      const type = record.type === "text_input" ? "text_input" : "multiple_choice";
+      const confidence =
+        typeof record.confidence === "number"
+          ? Math.max(0, Math.min(1, record.confidence))
+          : 0.6;
+      return { answer: String(record.answer), type, confidence };
+    };
+
+    const extractFirstJsonChunk = (text: string): string | null => {
+      const start = text.search(/[\[{]/);
+      if (start < 0) return null;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      const openChar = text[start];
+      const closeChar = openChar === "[" ? "]" : "}";
+
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === "\\") {
+            escaped = true;
+          } else if (ch === "\"") {
+            inString = false;
+          }
+          continue;
+        }
+
+        if (ch === "\"") {
+          inString = true;
+          continue;
+        }
+
+        if (ch === openChar) depth++;
+        if (ch === closeChar) {
+          depth--;
+          if (depth === 0) {
+            return text.slice(start, i + 1);
+          }
+        }
+      }
+      return null;
+    };
+
     try {
       const clean = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
-      if (!parsed?.answer || !parsed?.type) return null;
-      const type = parsed.type === "text_input" ? "text_input" : "multiple_choice";
-      const confidence =
-        typeof parsed.confidence === "number"
-          ? Math.max(0, Math.min(1, parsed.confidence))
-          : 0.6;
-      return { answer: String(parsed.answer), type, confidence };
+      const direct = JSON.parse(clean);
+      if (Array.isArray(direct)) return normalize(direct[0]);
+      return normalize(direct);
+    } catch {}
+
+    try {
+      const clean = raw.replace(/```json|```/g, "").trim();
+      const chunk = extractFirstJsonChunk(clean);
+      if (!chunk) return null;
+      const parsed = JSON.parse(chunk);
+      if (Array.isArray(parsed)) return normalize(parsed[0]);
+      return normalize(parsed);
     } catch {
       return null;
     }
