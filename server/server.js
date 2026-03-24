@@ -113,6 +113,47 @@ async function handleReferral(referrerId, referredId) {
   }
 }
 
+/** First balanced `{...}` in text (handles strings); safer than greedy /\{[\s\S]*\}/ */
+function extractFirstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+const ANALYZE_SYSTEM_PROMPT = `You are a quiz answering assistant analyzing a screenshot of a quiz page.
+You MUST respond with ONLY a raw JSON object. No markdown, no backticks, no explanation.
+
+IMPORTANT: Options may be full sentences (e.g. "An automation process with which you can...").
+- Copy the answer field EXACTLY as the full option text appears on screen, word for word.
+- Do not summarize or shorten it — copy it precisely so it can be found on screen.
+- option_index: which option it is counting from the topmost visible choice (1=first, 2=second, … up to 20 if needed).
+
+Format: {"answer":"exact full text of correct option","type":"multiple_choice","confidence":0.95,"option_index":3}
+For text input: {"answer":"word or phrase to type","type":"text_input","confidence":0.95,"option_index":null}
+
+If no question is visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}`;
+
 async function callGroq(messages, model = "meta-llama/llama-4-scout-17b-16e-instruct", maxTokens = 512) {
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -163,18 +204,7 @@ app.post("/analyze", express.json({ limit: "10mb" }), async (req, res) => {
     const raw = await callGroq([
       {
         role: "system",
-        content: `You are a quiz answering assistant analyzing a screenshot of a quiz page.
-You MUST respond with ONLY a raw JSON object. No markdown, no backticks, no explanation.
-
-IMPORTANT: Options may be full sentences (e.g. "An automation process with which you can...").
-- Copy the answer field EXACTLY as the full option text appears on screen, word for word.
-- Do not summarize or shorten it — copy it precisely so it can be found on screen.
-- option_index: which option it is (1=first radio button from top, 2=second, 3=third, 4=fourth).
-
-Format: {"answer":"exact full text of correct option","type":"multiple_choice","confidence":0.95,"option_index":3}
-For text input: {"answer":"word or phrase to type","type":"text_input","confidence":0.95,"option_index":null}
-
-If no question is visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}`,
+        content: ANALYZE_SYSTEM_PROMPT,
       },
       {
         role: "user",
@@ -190,14 +220,19 @@ If no question is visible: {"answer":"","type":"multiple_choice","confidence":0,
     // Strip any markdown fences just in case
     const clean = raw.replace(/```json|```/gi, "").trim();
 
-    // Extract JSON object even if there's surrounding text
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    const jsonStr = extractFirstJsonObject(clean);
+    if (!jsonStr) {
       console.error("No JSON found in analyze response:", clean);
       return res.status(500).json({ error: "Could not parse answer" });
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch (e) {
+      console.error("JSON.parse failed:", e.message, jsonStr.slice(0, 200));
+      return res.status(500).json({ error: "Could not parse answer" });
+    }
     console.log("Analyze parsed:", parsed);
     res.json(parsed);
   } catch (err) {
@@ -250,7 +285,7 @@ If you cannot find the text, return: {"x":0.5,"y":0.5,"found":false}`,
 // ── /ask — main chat + automation endpoint ─────────────────────────────────
 app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
   try {
-    const { base64Image, message, history = [] } = req.body;
+    const { base64Image, message, history = [], jsonAnalyze = false } = req.body;
     const token = req.headers.authorization?.replace("Bearer ", "");
 
     console.log("TOKEN:", token ? "present" : "missing");
@@ -284,7 +319,10 @@ app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
     const isAutoFollowUp = typeof message === "string" && message.startsWith("[AUTO]");
 
     let systemContent;
-    if (!hasImage) {
+    if (jsonAnalyze && hasImage) {
+      // Same behavior as /analyze so the app's fallback can actually parse JSON.
+      systemContent = ANALYZE_SYSTEM_PROMPT;
+    } else if (!hasImage) {
       systemContent = `You are agrade, a helpful AI assistant. Be concise and direct. Answer the user's question clearly. If they mention their screen or want to share it, remind them to use the camera button or Ctrl+Shift+G.`;
     } else if (isAutoFollowUp) {
       systemContent = `You are agrade, a screen automation agent running in autonomous mode.
@@ -341,7 +379,8 @@ Coordinates are normalized 0.0-1.0. Put action tags at the end of your response.
       ? "meta-llama/llama-4-maverick-17b-16e-instruct"
       : "meta-llama/llama-4-scout-17b-16e-instruct";
 
-    const result = await callGroq(messages, model, hasImage ? 256 : 512);
+    const maxTok = jsonAnalyze && hasImage ? 150 : hasImage ? 256 : 512;
+    const result = await callGroq(messages, model, maxTok);
     console.log("Response:", result);
     res.json({ result });
   } catch (err) {
