@@ -500,9 +500,10 @@ fn find_radio_buttons_uia() -> Vec<(f64, f64)> {
             let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
 
             // Only include elements inside the expected quiz option zone
-            // (mirrors the pixel-scan limits so the two paths agree)
+            // (mirrors the pixel-scan limits so the two paths agree).
+            // Exclude bottom ~28% — sidebar/nav often exposes ghost radios there.
             if cx < 0.02 || cx > 0.50 { continue; }
-            if cy < 0.15 || cy > 0.90 { continue; }
+            if cy < 0.15 || cy > 0.72 { continue; }
 
             results.push((cx, cy, rect.top));
         }
