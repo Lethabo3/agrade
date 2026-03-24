@@ -12,6 +12,7 @@ const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 const MAX_AUTOMATION_ROUNDS = 20;
+const AUTO_PROMPT = "Click the correct answer for every question on screen. Do not explain. Just click through all questions automatically until the quiz is done.";
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -61,7 +62,11 @@ const parseAutomationActions = (
     const type = parts[0] as AutomationAction["type"];
 
     if (type === "click" && parts.length >= 3) {
-      actions.push({ type: "click", x: parseFloat(parts[1]), y: parseFloat(parts[2]) });
+      const x = parseFloat(parts[1]);
+      const y = parseFloat(parts[2]);
+      if (!isNaN(x) && !isNaN(y)) {
+        actions.push({ type: "click", x, y });
+      }
     } else if (type === "type" && parts.length >= 2) {
       actions.push({ type: "type", text: parts.slice(1).join(":") });
     } else if (type === "wait" && parts.length >= 2) {
@@ -84,7 +89,6 @@ export default function App() {
   const [isAutomating, setIsAutomating] = useState<boolean>(false);
   const [automationStatus, setAutomationStatus] = useState<string>("");
   const [message, setMessage] = useState<string>("");
-  const [token, setToken] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const tokenRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -120,11 +124,9 @@ export default function App() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.access_token) {
         tokenRef.current = session.access_token;
-        setToken(session.access_token);
         setAuthReady(true);
       } else if (authReady) {
         tokenRef.current = null;
-        setToken(null);
         open(LOGIN_URL);
       } else {
         setAuthReady(true);
@@ -135,9 +137,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const unlisten = onOpenUrl((urls) => {
-      handleDeepLink(urls[0]);
-    });
+    const unlisten = onOpenUrl((urls) => handleDeepLink(urls[0]));
 
     const unlistenTauri = listen("deep-link-received", (event) => {
       handleDeepLink(event.payload as string);
@@ -146,9 +146,7 @@ export default function App() {
     const unlistenFocus = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {
         if (focused) {
-          setTimeout(() => {
-            invoke("reapply_stealth").catch(() => {});
-          }, 300);
+          setTimeout(() => invoke("reapply_stealth").catch(() => {}), 300);
         }
       }
     );
@@ -168,47 +166,32 @@ export default function App() {
   const handleUpgrade = async () => {
     const { data } = await supabase.auth.getUser();
     const userId = data?.user?.id;
-    const pricingUrl = userId
-      ? `${PRICING_BASE_URL}?user_id=${userId}`
-      : PRICING_BASE_URL;
-    open(pricingUrl);
+    open(userId ? `${PRICING_BASE_URL}?user_id=${userId}` : PRICING_BASE_URL);
   };
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     tokenRef.current = null;
-    setToken(null);
     setMessages([]);
     setHistory([]);
     open(LOGIN_URL);
   };
 
-  // Core fetch — used by both normal send and automation loop
+  // ── Core network call ──────────────────────────────────────────────────────
   const fetchFromServer = async (
     userText: string,
     base64Image: string | undefined,
     hist: HistoryEntry[]
   ): Promise<{ rawText: string; newHistory: HistoryEntry[] } | null> => {
-    const updatedHistory: HistoryEntry[] = [
-      ...hist,
-      { role: "user", content: userText || "[screenshot captured]" },
-    ];
-
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
 
-      const body: Record<string, unknown> = {
-        message: userText,
-        history: hist,
-      };
+      const body: Record<string, unknown> = { message: userText, history: hist };
       if (base64Image) body.base64Image = base64Image;
 
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (tokenRef.current)
-        headers["Authorization"] = `Bearer ${tokenRef.current}`;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
 
       const res = await fetch(SERVER_URL, {
         method: "POST",
@@ -228,30 +211,35 @@ export default function App() {
       if (res.status === 401) {
         await supabase.auth.signOut();
         tokenRef.current = null;
-        setToken(null);
         open(LOGIN_URL);
         return null;
       }
 
       const rawText = data.result || data.message || "No response received.";
-      return { rawText, newHistory: updatedHistory };
+      const newHistory: HistoryEntry[] = [
+        ...hist,
+        { role: "user", content: userText || "[screenshot captured]" },
+      ];
+      return { rawText, newHistory };
     } catch (err: unknown) {
-      if (err instanceof Error && err.name !== "AbortError") {
-        setMessages((prev) => [
-          ...prev,
-          { role: "ai", text: "Error: " + String(err) },
-        ]);
-      } else if (err instanceof Error && err.name === "AbortError") {
-        setMessages((prev) => [
-          ...prev,
-          { role: "ai", text: "Server is waking up — try again in 30 seconds." },
-        ]);
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "ai", text: "Server is waking up — try again in 30 seconds." },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { role: "ai", text: "Error: " + err.message },
+          ]);
+        }
       }
       return null;
     }
   };
 
-  // Execute one batch of actions, returns a fresh screenshot taken after settling
+  // ── Execute one batch of actions, return fresh screenshot ─────────────────
   const executeActions = async (actions: AutomationAction[]): Promise<string> => {
     await invoke("hide_window").catch(() => {});
     await sleep(150);
@@ -263,31 +251,29 @@ export default function App() {
             `Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`
           );
           await invoke("click_at", { x: action.x, y: action.y });
-          await sleep(100);
+          await sleep(120);
         } else if (action.type === "type" && action.text) {
           setAutomationStatus(`Typing answer…`);
           await invoke("type_text", { text: action.text });
-          await sleep(80);
+          await sleep(100);
         } else if (action.type === "wait") {
           const ms = action.ms ?? 500;
           setAutomationStatus(`Waiting ${ms}ms…`);
           await sleep(ms);
-        } else if (action.type === "screenshot") {
-          // mid-sequence screenshot is just a pause point; final one captured below
         }
+        // screenshot actions handled at end of round
       } catch (err) {
         console.error("Action failed:", action, err);
       }
     }
 
-    // Let UI settle then capture
-    await sleep(500);
+    await sleep(600); // let UI settle
     const screenshot = await invoke<string>("capture_screen");
     await invoke("show_window").catch(() => {});
     return screenshot;
   };
 
-  // Full autonomous loop
+  // ── Full autonomous loop ───────────────────────────────────────────────────
   const runAutomationLoop = async (
     initialActions: AutomationAction[],
     initialHistory: HistoryEntry[],
@@ -305,7 +291,6 @@ export default function App() {
 
       const freshScreenshot = await executeActions(actions);
 
-      // Ask AI what to do next
       setIsLoading(true);
       setAutomationStatus(`Round ${round} — evaluating screen…`);
 
@@ -318,17 +303,12 @@ export default function App() {
 
       const { rawText, newHistory } = result;
 
-      // Task done
       if (rawText.trim().startsWith("TASK_COMPLETE")) {
         setMessages((prev) => [
           ...prev,
           { role: "ai", text: "✓ Task complete.", isAutomation: true },
         ]);
-        currentHistory = [
-          ...newHistory,
-          { role: "assistant", content: "TASK_COMPLETE" },
-        ];
-        setHistory(currentHistory);
+        setHistory([...newHistory, { role: "assistant", content: "TASK_COMPLETE" }]);
         actions = [];
         break;
       }
@@ -339,11 +319,7 @@ export default function App() {
       if (aiText) {
         setMessages((prev) => [
           ...prev,
-          {
-            role: "ai",
-            text: aiText,
-            isAutomation: nextActions.length > 0,
-          },
+          { role: "ai", text: aiText, isAutomation: nextActions.length > 0 },
         ]);
       }
 
@@ -376,7 +352,7 @@ export default function App() {
     setTimeout(scrollToBottom, 50);
   };
 
-  // Normal send (text only)
+  // ── Normal send ────────────────────────────────────────────────────────────
   const sendToServer = async (
     userText: string,
     base64Image?: string,
@@ -409,11 +385,23 @@ export default function App() {
     setTimeout(scrollToBottom, 50);
 
     if (hasActions) {
-      const taskDesc = userText.startsWith("[AUTO]")
-        ? userText
-        : userText || "complete the task on screen";
-      await runAutomationLoop(actions, finalHistory, taskDesc);
+      await runAutomationLoop(
+        actions,
+        finalHistory,
+        userText || "complete the task on screen"
+      );
     }
+  };
+
+  // ── One-tap auto button ────────────────────────────────────────────────────
+  const handleAutoAnswer = async () => {
+    if (isLoading || isAutomating) return;
+    const screenBase64 = await invoke<string>("capture_screen");
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text: "Auto-answering quiz…", screenshotOnly: false },
+    ]);
+    await sendToServer(AUTO_PROMPT, screenBase64);
   };
 
   const handleSubmit = async () => {
@@ -622,6 +610,8 @@ export default function App() {
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
+
+              {/* Screenshot button */}
               <button
                 className="hud-icon-btn"
                 onClick={handleCaptureWithMessage}
@@ -633,6 +623,19 @@ export default function App() {
                   <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
+
+              {/* Auto-answer button */}
+              <button
+                className="hud-icon-btn"
+                onClick={handleAutoAnswer}
+                disabled={isBlocked}
+                title="Auto-answer quiz"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                </svg>
+              </button>
+
               <div className="hud-input-row">
                 <textarea
                   ref={inputRef}
@@ -640,7 +643,7 @@ export default function App() {
                   placeholder={
                     isAutomating
                       ? automationStatus || "Automating…"
-                      : "Ask anything about screen or conversation..."
+                      : "Ask anything or capture screen…"
                   }
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
