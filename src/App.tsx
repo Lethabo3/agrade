@@ -249,16 +249,17 @@ export default function App() {
     const normalize = (value: unknown) => {
       if (!value || typeof value !== "object") return null;
       const r = value as Record<string, unknown>;
-      if (!r.answer || !r.type) return null;
+      if (typeof r.answer !== "string") return null;
+      if (r.type !== "multiple_choice" && r.type !== "text_input") return null;
+      const idx = r.option_index;
+      const option_index =
+        typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 20 ? idx : null;
       return {
-        answer: String(r.answer),
-        type: r.type === "text_input" ? ("text_input" as const) : ("multiple_choice" as const),
+        answer: r.answer,
+        type: r.type as "multiple_choice" | "text_input",
         confidence:
           typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6,
-        option_index:
-          typeof r.option_index === "number" && [1, 2, 3, 4].includes(r.option_index)
-            ? r.option_index
-            : null,
+        option_index,
       };
     };
 
@@ -316,26 +317,40 @@ export default function App() {
         return { analysis: null, reason: "Screenshot empty." };
       }
 
+      let lastAnalyzeStatus = 0;
+      let lastAnalyzeDetail = "";
+
       for (let attempt = 1; attempt <= 2; attempt++) {
         const res = await fetch(ANALYZE_URL, {
           method: "POST",
           headers: authHeaders(),
           body: JSON.stringify({ base64Image }),
         });
-        if (!res.ok) { await sleep(300); continue; }
-        const data = await res.json();
-        if (data?.answer && data?.type) {
+        lastAnalyzeStatus = res.status;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          lastAnalyzeDetail =
+            typeof data?.error === "string" ? data.error : typeof data?.message === "string" ? data.message : "";
+          await sleep(400);
+          continue;
+        }
+        if (
+          data &&
+          typeof data.answer === "string" &&
+          (data.type === "multiple_choice" || data.type === "text_input")
+        ) {
+          const idx = data.option_index;
           return {
             analysis: {
-              answer: String(data.answer),
-              type: data.type === "text_input" ? "text_input" : "multiple_choice",
+              answer: data.answer,
+              type: data.type,
               confidence:
                 typeof data.confidence === "number"
                   ? Math.max(0, Math.min(1, data.confidence))
                   : 0.7,
               option_index:
-                typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
-                  ? data.option_index
+                typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= 20
+                  ? idx
                   : null,
             },
           };
@@ -348,8 +363,9 @@ export default function App() {
         headers: authHeaders(),
         body: JSON.stringify({
           base64Image,
+          jsonAnalyze: true,
           message:
-            'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=first option, 2=second, etc. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
+            'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=topmost option, 2=next, up to ~20 for long lists. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
           history: [],
         }),
       });
@@ -361,7 +377,17 @@ export default function App() {
       const fallbackData = await fallbackRes.json();
       const parsed = parseAnalyzeJson(String(fallbackData?.result || ""));
       if (parsed) return { analysis: parsed };
-      return { analysis: null, reason: "Could not parse response." };
+      const hint =
+        lastAnalyzeDetail ||
+        (lastAnalyzeStatus === 429
+          ? "Server limit reached (/analyze)."
+          : lastAnalyzeStatus
+            ? `/analyze returned ${lastAnalyzeStatus}.`
+            : "");
+      return {
+        analysis: null,
+        reason: hint ? `Could not parse response. (${hint})` : "Could not parse response.",
+      };
     } catch (err) {
       return { analysis: null, reason: err instanceof Error ? err.message : "Unknown error" };
     }
@@ -390,7 +416,7 @@ export default function App() {
           ? uiaPositions
           : await invoke<[number, number][]>("find_option_positions", {
               base64Image,
-              maxOptions: 4,
+              maxOptions: 12,
             });
 
       // Remove positions clustered too tightly on the y-axis (likely mis-detections)
@@ -605,10 +631,10 @@ export default function App() {
         await invoke("click_at", { x: 0.85, y: 0.88 });
       }
 
-      await sleep(1000);
+      await sleep(1800);
       await invoke("show_window").catch(() => {});
 
-      await sleep(300);
+      await sleep(400);
       setTimeout(scrollToBottom, 50);
     }
 
