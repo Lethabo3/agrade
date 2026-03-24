@@ -11,6 +11,7 @@ import "./App.css";
 const SERVER_URL = "https://agrade-cbwf.onrender.com/ask";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
+const MAX_AUTOMATION_ROUNDS = 20;
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -30,13 +31,12 @@ interface HistoryEntry {
   content: string;
 }
 
-// Parsed action from AI automation response
 interface AutomationAction {
   type: "click" | "type" | "wait" | "screenshot";
-  x?: number;       // normalized 0.0–1.0 for click
-  y?: number;       // normalized 0.0–1.0 for click
-  text?: string;    // for type
-  ms?: number;      // for wait
+  x?: number;
+  y?: number;
+  text?: string;
+  ms?: number;
 }
 
 const stripMarkdown = (text: string): string => {
@@ -49,17 +49,6 @@ const stripMarkdown = (text: string): string => {
     .replace(/^\s*[-•]\s/gm, "· ");
 };
 
-/**
- * Parse an AI response that may contain automation action blocks.
- * Expected format inside the AI reply:
- *
- *   [ACTION:click:0.5:0.3]
- *   [ACTION:type:Hello world]
- *   [ACTION:wait:500]
- *   [ACTION:screenshot]
- *
- * Returns { actions, cleanText } where cleanText has action tags removed.
- */
 const parseAutomationActions = (
   text: string
 ): { actions: AutomationAction[]; cleanText: string } => {
@@ -74,7 +63,6 @@ const parseAutomationActions = (
     if (type === "click" && parts.length >= 3) {
       actions.push({ type: "click", x: parseFloat(parts[1]), y: parseFloat(parts[2]) });
     } else if (type === "type" && parts.length >= 2) {
-      // Rejoin in case text itself contains colons
       actions.push({ type: "type", text: parts.slice(1).join(":") });
     } else if (type === "wait" && parts.length >= 2) {
       actions.push({ type: "wait", ms: parseInt(parts[1], 10) });
@@ -143,7 +131,6 @@ export default function App() {
         open(LOGIN_URL);
       }
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
@@ -173,50 +160,9 @@ export default function App() {
     };
   }, []);
 
-  /**
-   * Execute a sequence of parsed automation actions.
-   * Hides the overlay before acting, shows it after.
-   */
-  const runAutomationActions = async (
-    actions: AutomationAction[],
-    onScreenshot: (base64: string) => void
-  ) => {
-    if (actions.length === 0) return;
-
-    setIsAutomating(true);
-
-    // Hide overlay so it doesn't interfere with clicks
-    await invoke("hide_window").catch(() => {});
-    await sleep(150);
-
-    for (const action of actions) {
-      try {
-        if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
-          setAutomationStatus(`Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`);
-          await invoke("click_at", { x: action.x, y: action.y });
-          await sleep(80);
-        } else if (action.type === "type" && action.text) {
-          setAutomationStatus(`Typing: "${action.text.slice(0, 24)}${action.text.length > 24 ? "…" : ""}"`);
-          await invoke("type_text", { text: action.text });
-          await sleep(50);
-        } else if (action.type === "wait") {
-          const ms = action.ms ?? 500;
-          setAutomationStatus(`Waiting ${ms}ms…`);
-          await sleep(ms);
-        } else if (action.type === "screenshot") {
-          setAutomationStatus("Capturing screen…");
-          const base64 = await invoke<string>("capture_screen");
-          onScreenshot(base64);
-        }
-      } catch (err) {
-        console.error("Automation action failed:", action, err);
-      }
-    }
-
-    // Restore overlay
-    await invoke("show_window").catch(() => {});
-    setIsAutomating(false);
-    setAutomationStatus("");
+  const scrollToBottom = () => {
+    if (bodyRef.current)
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   };
 
   const handleUpgrade = async () => {
@@ -237,20 +183,12 @@ export default function App() {
     open(LOGIN_URL);
   };
 
-  const scrollToBottom = () => {
-    if (bodyRef.current)
-      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  };
-
-  const sendToServer = async (
+  // Core fetch — used by both normal send and automation loop
+  const fetchFromServer = async (
     userText: string,
-    base64Image?: string,
-    currentHistory?: HistoryEntry[]
-  ) => {
-    const hist = currentHistory ?? history;
-    setIsLoading(true);
-    setTimeout(scrollToBottom, 50);
-
+    base64Image: string | undefined,
+    hist: HistoryEntry[]
+  ): Promise<{ rawText: string; newHistory: HistoryEntry[] } | null> => {
     const updatedHistory: HistoryEntry[] = [
       ...hist,
       { role: "user", content: userText || "[screenshot captured]" },
@@ -258,20 +196,11 @@ export default function App() {
 
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => {
-        controller.abort();
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: "Server is waking up — try again in 30 seconds.",
-          },
-        ]);
-      }, 15000);
+      const timeout = setTimeout(() => controller.abort(), 20000);
 
       const body: Record<string, unknown> = {
         message: userText,
-        history: updatedHistory,
+        history: hist,
       };
       if (base64Image) body.base64Image = base64Image;
 
@@ -293,8 +222,7 @@ export default function App() {
 
       if (res.status === 429) {
         setMessages((prev) => [...prev, { role: "ai", text: "", isLimit: true }]);
-        setIsLoading(false);
-        return;
+        return null;
       }
 
       if (res.status === 401) {
@@ -302,48 +230,189 @@ export default function App() {
         tokenRef.current = null;
         setToken(null);
         open(LOGIN_URL);
-        setIsLoading(false);
-        return;
+        return null;
       }
 
       const rawText = data.result || data.message || "No response received.";
-      const { actions, cleanText } = parseAutomationActions(rawText);
-      const aiText = stripMarkdown(cleanText);
-
-      const hasActions = actions.length > 0;
-
-      setMessages((prev) => [
-        ...prev,
-        { role: "ai", text: aiText, isAutomation: hasActions },
-      ]);
-      const newHistory: HistoryEntry[] = [
-        ...updatedHistory,
-        { role: "assistant", content: aiText },
-      ];
-      setHistory(newHistory);
-      setIsLoading(false);
-
-      // Run automation actions after updating UI
-      if (hasActions) {
-        await runAutomationActions(actions, async (screenshotBase64) => {
-          // If a screenshot action fires mid-sequence, feed it back as a follow-up
-          await sendToServer(
-            "[automated screenshot follow-up]",
-            screenshotBase64,
-            newHistory
-          );
-        });
-      }
+      return { rawText, newHistory: updatedHistory };
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== "AbortError") {
         setMessages((prev) => [
           ...prev,
           { role: "ai", text: "Error: " + String(err) },
         ]);
+      } else if (err instanceof Error && err.name === "AbortError") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "ai", text: "Server is waking up — try again in 30 seconds." },
+        ]);
       }
-      setIsLoading(false);
-    } finally {
+      return null;
+    }
+  };
+
+  // Execute one batch of actions, returns a fresh screenshot taken after settling
+  const executeActions = async (actions: AutomationAction[]): Promise<string> => {
+    await invoke("hide_window").catch(() => {});
+    await sleep(150);
+
+    for (const action of actions) {
+      try {
+        if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
+          setAutomationStatus(
+            `Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`
+          );
+          await invoke("click_at", { x: action.x, y: action.y });
+          await sleep(100);
+        } else if (action.type === "type" && action.text) {
+          setAutomationStatus(`Typing answer…`);
+          await invoke("type_text", { text: action.text });
+          await sleep(80);
+        } else if (action.type === "wait") {
+          const ms = action.ms ?? 500;
+          setAutomationStatus(`Waiting ${ms}ms…`);
+          await sleep(ms);
+        } else if (action.type === "screenshot") {
+          // mid-sequence screenshot is just a pause point; final one captured below
+        }
+      } catch (err) {
+        console.error("Action failed:", action, err);
+      }
+    }
+
+    // Let UI settle then capture
+    await sleep(500);
+    const screenshot = await invoke<string>("capture_screen");
+    await invoke("show_window").catch(() => {});
+    return screenshot;
+  };
+
+  // Full autonomous loop
+  const runAutomationLoop = async (
+    initialActions: AutomationAction[],
+    initialHistory: HistoryEntry[],
+    taskDescription: string
+  ) => {
+    setIsAutomating(true);
+    let actions = initialActions;
+    let currentHistory = initialHistory;
+    let round = 0;
+
+    while (actions.length > 0 && round < MAX_AUTOMATION_ROUNDS) {
+      round++;
+      setAutomationStatus(`Round ${round} — executing ${actions.length} action(s)…`);
       setTimeout(scrollToBottom, 50);
+
+      const freshScreenshot = await executeActions(actions);
+
+      // Ask AI what to do next
+      setIsLoading(true);
+      setAutomationStatus(`Round ${round} — evaluating screen…`);
+
+      const followUp = `[AUTO] Continue the task: "${taskDescription}". Study the current screenshot. Complete any remaining questions or steps. If nothing is left to do, respond with exactly: TASK_COMPLETE`;
+
+      const result = await fetchFromServer(followUp, freshScreenshot, currentHistory);
+      setIsLoading(false);
+
+      if (!result) break;
+
+      const { rawText, newHistory } = result;
+
+      // Task done
+      if (rawText.trim().startsWith("TASK_COMPLETE")) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "ai", text: "✓ Task complete.", isAutomation: true },
+        ]);
+        currentHistory = [
+          ...newHistory,
+          { role: "assistant", content: "TASK_COMPLETE" },
+        ];
+        setHistory(currentHistory);
+        actions = [];
+        break;
+      }
+
+      const { actions: nextActions, cleanText } = parseAutomationActions(rawText);
+      const aiText = stripMarkdown(cleanText);
+
+      if (aiText) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: aiText,
+            isAutomation: nextActions.length > 0,
+          },
+        ]);
+      }
+
+      currentHistory = [
+        ...newHistory,
+        { role: "assistant", content: aiText || rawText },
+      ];
+      setHistory(currentHistory);
+      actions = nextActions;
+      setTimeout(scrollToBottom, 50);
+
+      if (actions.length === 0) break;
+    }
+
+    await invoke("show_window").catch(() => {});
+    setIsAutomating(false);
+    setAutomationStatus("");
+
+    if (round >= MAX_AUTOMATION_ROUNDS) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Reached the ${MAX_AUTOMATION_ROUNDS}-round limit. Task may not be fully complete.`,
+          isAutomation: true,
+        },
+      ]);
+    }
+
+    setTimeout(scrollToBottom, 50);
+  };
+
+  // Normal send (text only)
+  const sendToServer = async (
+    userText: string,
+    base64Image?: string,
+    currentHistory?: HistoryEntry[]
+  ) => {
+    const hist = currentHistory ?? history;
+    setIsLoading(true);
+    setTimeout(scrollToBottom, 50);
+
+    const result = await fetchFromServer(userText, base64Image, hist);
+    setIsLoading(false);
+
+    if (!result) return;
+
+    const { rawText, newHistory } = result;
+    const { actions, cleanText } = parseAutomationActions(rawText);
+    const aiText = stripMarkdown(cleanText);
+    const hasActions = actions.length > 0;
+
+    setMessages((prev) => [
+      ...prev,
+      { role: "ai", text: aiText, isAutomation: hasActions },
+    ]);
+
+    const finalHistory: HistoryEntry[] = [
+      ...newHistory,
+      { role: "assistant", content: aiText },
+    ];
+    setHistory(finalHistory);
+    setTimeout(scrollToBottom, 50);
+
+    if (hasActions) {
+      const taskDesc = userText.startsWith("[AUTO]")
+        ? userText
+        : userText || "complete the task on screen";
+      await runAutomationLoop(actions, finalHistory, taskDesc);
     }
   };
 
@@ -392,9 +461,7 @@ export default function App() {
 
     const setupShortcuts = async () => {
       for (const s of shortcuts) {
-        try {
-          await unregister(s);
-        } catch (_) {}
+        try { await unregister(s); } catch (_) {}
       }
 
       await register("CommandOrControl+Shift+G", async () => {
@@ -416,45 +483,27 @@ export default function App() {
       await register("Control+Left", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({
-          type: "Physical",
-          x: pos.x - STEP,
-          y: pos.y,
-        } as any);
+        await win.setPosition({ type: "Physical", x: pos.x - STEP, y: pos.y } as any);
       });
       await register("Control+Right", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({
-          type: "Physical",
-          x: pos.x + STEP,
-          y: pos.y,
-        } as any);
+        await win.setPosition({ type: "Physical", x: pos.x + STEP, y: pos.y } as any);
       });
       await register("Control+Up", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({
-          type: "Physical",
-          x: pos.x,
-          y: pos.y - STEP,
-        } as any);
+        await win.setPosition({ type: "Physical", x: pos.x, y: pos.y - STEP } as any);
       });
       await register("Control+Down", async () => {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
-        await win.setPosition({
-          type: "Physical",
-          x: pos.x,
-          y: pos.y + STEP,
-        } as any);
+        await win.setPosition({ type: "Physical", x: pos.x, y: pos.y + STEP } as any);
       });
     };
 
     setupShortcuts();
-    return () => {
-      shortcuts.forEach((s) => unregister(s));
-    };
+    return () => { shortcuts.forEach((s) => unregister(s)); };
   }, [handleAskGroq, message]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -465,9 +514,7 @@ export default function App() {
   };
 
   const copyLastResponse = () => {
-    const lastAi = [...messages]
-      .reverse()
-      .find((m) => m.role === "ai" && !m.isLimit);
+    const lastAi = [...messages].reverse().find((m) => m.role === "ai" && !m.isLimit);
     if (lastAi) navigator.clipboard.writeText(lastAi.text);
   };
 
@@ -483,71 +530,30 @@ export default function App() {
   return (
     <div className="hud-root">
       <div className="hud-panel">
+
         {/* ── Header ── */}
         <div className="hud-header" data-tauri-drag-region>
-          <span className="hud-title" data-tauri-drag-region>
-            agrade
-          </span>
+          <span className="hud-title" data-tauri-drag-region>agrade</span>
           <div className="hud-header-actions">
             {messages.length > 0 && !isLimitReached && (
               <>
-                <button
-                  className="hud-action-btn"
-                  onClick={copyLastResponse}
-                  title="Copy last response"
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
+                <button className="hud-action-btn" onClick={copyLastResponse} title="Copy last response">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="9" y="9" width="13" height="13" rx="2" />
                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                   </svg>
                 </button>
-                <button
-                  className="hud-action-btn"
-                  onClick={clearConversation}
-                  title="Clear conversation"
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
+                <button className="hud-action-btn" onClick={clearConversation} title="Clear conversation">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="3 6 5 6 21 6" />
                     <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                    <path d="M10 11v6" />
-                    <path d="M14 11v6" />
+                    <path d="M10 11v6" /><path d="M14 11v6" />
                   </svg>
                 </button>
               </>
             )}
-            <button
-              className="hud-action-btn"
-              onClick={handleSignOut}
-              title="Sign out"
-            >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
+            <button className="hud-action-btn" onClick={handleSignOut} title="Sign out">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                 <polyline points="16 17 21 12 16 7" />
                 <line x1="21" y1="12" x2="9" y2="12" />
@@ -566,16 +572,7 @@ export default function App() {
                   <div className="hud-bubble user">
                     {msg.screenshotOnly ? (
                       <div className="hud-screenshot-tag">
-                        <svg
-                          width="11"
-                          height="11"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                           <circle cx="12" cy="13" r="4" />
                         </svg>
@@ -588,9 +585,7 @@ export default function App() {
                 </div>
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
-                  <p className="hud-limit-text">
-                    You've used your 5 free messages
-                  </p>
+                  <p className="hud-limit-text">You've used your 5 free messages</p>
                   <button className="hud-upgrade-btn" onClick={handleUpgrade}>
                     Upgrade to Pro
                   </button>
@@ -601,25 +596,19 @@ export default function App() {
                   className={`hud-ai-response${msg.isAutomation ? " hud-ai-automation" : ""}`}
                 >
                   {msg.isAutomation && (
-                    <span className="hud-automation-badge">
-                      ⚡ automated
-                    </span>
+                    <span className="hud-automation-badge">⚡ automated</span>
                   )}
                   {msg.text}
                 </div>
               )
             )}
 
-            {/* Loading indicator */}
             {isLoading && (
               <div className="hud-thinking">
-                <span />
-                <span />
-                <span />
+                <span /><span /><span />
               </div>
             )}
 
-            {/* Automation status indicator */}
             {isAutomating && (
               <div className="hud-automation-status">
                 <span className="hud-automation-spinner" />
@@ -639,16 +628,7 @@ export default function App() {
                 disabled={isBlocked}
                 title="Capture screen"
               >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
                 </svg>
@@ -674,12 +654,7 @@ export default function App() {
                   disabled={isBlocked || !message.trim()}
                   title="Send"
                 >
-                  <svg
-                    width="13"
-                    height="13"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                  >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
                   </svg>
                 </button>
