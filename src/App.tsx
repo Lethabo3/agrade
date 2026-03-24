@@ -412,26 +412,39 @@ export default function App() {
     text: string
   ): Promise<{ x: number; y: number; found: boolean }> => {
     try {
-      const res = await fetch(SERVER_URL, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({
-          base64Image,
-          message: `Find the quiz answer option text "${text}" on the browser page and click it. Ignore app overlays, IDE/editor text, taskbar, and system UI. Emit ONLY one [ACTION:click:X:Y] tag for the option center coordinates. If not found, emit nothing.`,
-          history: [],
-        }),
-      });
-      if (!res.ok) return { x: 0.5, y: 0.5, found: false };
-      const data = await res.json();
-      const rawText = String(data?.result || "");
-      const { actions } = parseAutomationActions(rawText);
-      const clickAction = actions.find((a) => a.type === "click");
-      if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
-        if (!isSafeClickPoint(clickAction.x, clickAction.y)) {
-          return { x: 0.5, y: 0.5, found: false };
+      const compact = text.replace(/\s+/g, " ").trim();
+      const words = compact.split(" ").filter(Boolean);
+      const shortPhrase = words.slice(0, 8).join(" ");
+      const anchorPhrase =
+        words.length > 14 ? `${words.slice(0, 4).join(" ")} ... ${words.slice(-4).join(" ")}` : compact;
+
+      const prompts = [
+        `Find the quiz answer option text "${compact}" on the browser page and click its center. Ignore app overlays, IDE/editor text, taskbar, and system UI. Emit ONLY one [ACTION:click:X:Y] tag. If not found, emit nothing.`,
+        `Find and click the answer option that BEST MATCHES this phrase: "${shortPhrase}". The full option may be longer/truncated. Ignore app overlays and non-browser UI. Emit ONLY one [ACTION:click:X:Y] tag.`,
+        `Find and click the quiz option semantically matching: "${anchorPhrase}". Do not click chrome tabs, address bar, close buttons, taskbar, or this app. Emit ONLY one [ACTION:click:X:Y] tag.`,
+      ];
+
+      for (const message of prompts) {
+        const res = await fetch(SERVER_URL, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            base64Image,
+            message,
+            history: [],
+          }),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const rawText = String(data?.result || "");
+        const { actions } = parseAutomationActions(rawText);
+        const clickAction = actions.find((a) => a.type === "click");
+        if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
+          if (!isSafeClickPoint(clickAction.x, clickAction.y)) continue;
+          return { x: clickAction.x, y: clickAction.y, found: true };
         }
-        return { x: clickAction.x, y: clickAction.y, found: true };
       }
+
       return { x: 0.5, y: 0.5, found: false };
     } catch {
       return { x: 0.5, y: 0.5, found: false };
