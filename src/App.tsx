@@ -18,7 +18,7 @@ const MAX_PAGE_NAVIGATIONS = 35;
 const MAX_ANALYZE_STEPS = 120;
 const MIN_OPTION_Y_GAP = 0.04;
 // How many times the same answer text must repeat before we scroll the page
-const SAME_ANSWER_SCROLL_THRESHOLD = 2;
+const SAME_ANSWER_SCROLL_THRESHOLD = 3;
 /** Down-scroll steps while hunting for more questions on the same page before clicking Next. */
 const MAX_SCROLLS_PER_PAGE = 10;
 const SCROLL_AMOUNT_PER_STEP = 3;
@@ -593,6 +593,8 @@ export default function App() {
         if (!clicked) {
           return { result: "failed", reason: "Could not detect or click that choice" };
         }
+        lastAnswerText = "";
+        sameAnswerCount = 0;
       } else {
         await invoke("hide_window").catch(() => {});
         await sleep(150);
@@ -604,6 +606,8 @@ export default function App() {
         await invoke("type_text", { text: "\n" });
         await sleep(800);
         await invoke("show_window").catch(() => {});
+        lastAnswerText = "";
+        sameAnswerCount = 0;
       }
 
       await sleep(650);
