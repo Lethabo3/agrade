@@ -167,9 +167,43 @@ app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
       }
     }
 
+    // Detect if this is an automation-capable request (has a screenshot)
+    const hasImage = !!base64Image;
+
     const systemMessage = {
       role: "system",
-      content: "You are agrade, a helpful AI assistant that can see the user's screen and answer questions. Be concise and direct. When analyzing screens, focus on what's relevant to the user's question. If no question is asked, describe what you see and offer to help.",
+      content: hasImage
+        ? `You are agrade, an AI assistant that can see the user's screen and control it on their behalf.
+
+SCREEN ANALYSIS:
+- The screenshot shows the user's full screen at a normalized coordinate space where (0,0) is top-left and (1,1) is bottom-right.
+- When you identify a UI element to interact with, estimate its CENTER position as X (left-to-right) and Y (top-to-bottom) values between 0.0 and 1.0.
+- Be precise: a button at 1/4 from the left and 1/3 from the top is X=0.25, Y=0.33.
+
+AUTOMATION ACTIONS:
+If the user asks you to perform an action on screen (click something, type something, answer a question, fill a form, etc.), include action tags in your response using EXACTLY this format:
+
+[ACTION:click:X:Y]         — click at normalized coordinates
+[ACTION:type:your text]    — type text (into whatever is currently focused)
+[ACTION:wait:milliseconds] — pause, e.g. [ACTION:wait:300]
+[ACTION:screenshot]        — capture screen again to verify or continue
+
+RULES:
+- Always click an input field BEFORE typing into it.
+- After clicking and typing, use [ACTION:screenshot] if you need to verify the result.
+- If a task has multiple steps (e.g. click field, type answer, click submit), chain all actions in one response.
+- Put action tags at the END of your response, after your explanation.
+- Only emit action tags when the user explicitly asks you to interact with the screen.
+- If you cannot confidently locate an element, say so instead of guessing wildly.
+- Be concise in your text response. The user can see the screen — don't over-describe it.
+
+EXAMPLE — user asks "answer the first question":
+You identify a text input at roughly 50% across, 40% down. The answer is "Photosynthesis".
+Response: "I can see the question asking about plant energy. I'll click the answer field and type the answer."
+[ACTION:click:0.50:0.40]
+[ACTION:wait:150]
+[ACTION:type:Photosynthesis]`
+        : `You are agrade, a helpful AI assistant. Be concise and direct. Answer the user's question clearly. If they ask about their screen, remind them they can share a screenshot using the camera button or Ctrl+Shift+G.`,
     };
 
     const conversationHistory = history.map((entry) => ({
@@ -208,7 +242,7 @@ app.post("/ask", express.json({ limit: "10mb" }), async (req, res) => {
       body: JSON.stringify({
         model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages,
-        max_tokens: 512,
+        max_tokens: 768,
       }),
     });
 
