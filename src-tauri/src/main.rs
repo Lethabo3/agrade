@@ -49,9 +49,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Variant::VARIANT;
-#[cfg(target_os = "windows")]
-use windows::core::Interface;
+use windows::core::{Interface, VARIANT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationInvokePattern,
