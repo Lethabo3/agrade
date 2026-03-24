@@ -241,10 +241,20 @@ export default function App() {
 
   const parseAnalyzeJson = (
     raw: string
-  ): { answer: string; type: "multiple_choice" | "text_input"; confidence: number } | null => {
+  ): {
+    answer: string;
+    type: "multiple_choice" | "text_input";
+    confidence: number;
+    option_index: number | null;
+  } | null => {
     const normalize = (
       value: unknown
-    ): { answer: string; type: "multiple_choice" | "text_input"; confidence: number } | null => {
+    ): {
+      answer: string;
+      type: "multiple_choice" | "text_input";
+      confidence: number;
+      option_index: number | null;
+    } | null => {
       if (!value || typeof value !== "object") return null;
       const record = value as Record<string, unknown>;
       if (!record.answer || !record.type) return null;
@@ -253,7 +263,11 @@ export default function App() {
         typeof record.confidence === "number"
           ? Math.max(0, Math.min(1, record.confidence))
           : 0.6;
-      return { answer: String(record.answer), type, confidence };
+      const optionIndex =
+        typeof record.option_index === "number" && [1, 2, 3, 4].includes(record.option_index)
+          ? record.option_index
+          : null;
+      return { answer: String(record.answer), type, confidence, option_index: optionIndex };
     };
 
     const extractFirstJsonChunk = (text: string): string | null => {
@@ -321,6 +335,7 @@ export default function App() {
       answer: string;
       type: "multiple_choice" | "text_input";
       confidence: number;
+      option_index: number | null;
     } | null;
     reason?: string;
   }> => {
@@ -361,6 +376,10 @@ export default function App() {
                 typeof data.confidence === "number"
                   ? Math.max(0, Math.min(1, data.confidence))
                   : 0.7,
+              option_index:
+                typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
+                  ? data.option_index
+                  : null,
             },
           };
         }
@@ -373,7 +392,7 @@ export default function App() {
         body: JSON.stringify({
           base64Image,
           message:
-            'You are analyzing a browser quiz screenshot. Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0}. If a quiz question/options are not clearly visible, return {"answer":"","type":"multiple_choice","confidence":0}.',
+            'You are analyzing a browser quiz screenshot. Return JSON only: {"answer":"exact answer text","type":"multiple_choice or text_input","confidence":0.0-1.0,"option_index":1-4 or null}. If a quiz question/options are not clearly visible, return {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}.',
           history: [],
         }),
       });
@@ -481,6 +500,44 @@ export default function App() {
     }
   };
 
+  const locateOptionByIndex = async (
+    base64Image: string,
+    optionIndex: number
+  ): Promise<{ x: number; y: number; found: boolean }> => {
+    if (![1, 2, 3, 4].includes(optionIndex)) return { x: 0.5, y: 0.5, found: false };
+
+    try {
+      const prompts = [
+        `A quiz is visible in a browser. Click the center of option #${optionIndex} (count only visible answer options from top to bottom). Ignore tabs, address bar, taskbar, IDE, and this app. Emit ONLY one [ACTION:click:X:Y] tag.`,
+        `Click answer choice number ${optionIndex} for the current question (1=first option shown). Only click inside quiz options area. Emit ONLY one [ACTION:click:X:Y] tag.`,
+      ];
+
+      for (const message of prompts) {
+        const res = await fetch(SERVER_URL, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            base64Image,
+            message,
+            history: [],
+          }),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const rawText = String(data?.result || "");
+        const { actions } = parseAutomationActions(rawText);
+        const clickAction = actions.find((a) => a.type === "click");
+        if (clickAction && clickAction.x !== undefined && clickAction.y !== undefined) {
+          if (!isSafeClickPoint(clickAction.x, clickAction.y)) continue;
+          return { x: clickAction.x, y: clickAction.y, found: true };
+        }
+      }
+      return { x: 0.5, y: 0.5, found: false };
+    } catch {
+      return { x: 0.5, y: 0.5, found: false };
+    }
+  };
+
   // ── Execute actions ────────────────────────────────────────────────────────
   const executeActions = async (actions: AutomationAction[]): Promise<string> => {
     await invoke("hide_window").catch(() => {});
@@ -580,9 +637,14 @@ export default function App() {
       }]);
 
       if (analysis.type === "multiple_choice") {
-        // Locate the answer text on screen
-        setAutomationStatus(`Locating "${analysis.answer}"…`);
-        const location = await locateOnScreen(screenBase64, analysis.answer);
+        setAutomationStatus(
+          analysis.option_index
+            ? `Locating option #${analysis.option_index}...`
+            : `Locating "${analysis.answer}"...`
+        );
+        const location = analysis.option_index
+          ? await locateOptionByIndex(screenBase64, analysis.option_index)
+          : await locateOnScreen(screenBase64, analysis.answer);
         console.log("Location:", location);
 
         if (location.found) {
