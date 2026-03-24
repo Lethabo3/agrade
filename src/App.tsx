@@ -122,12 +122,18 @@ export default function App() {
       const accessToken = parsed.searchParams.get("token");
       const refreshToken = parsed.searchParams.get("refresh");
       if (accessToken && refreshToken) {
-        supabase.auth.setSession({
-          access_token: decodeURIComponent(accessToken),
-          refresh_token: decodeURIComponent(refreshToken),
-        }).then(({ data, error }) => {
-          console.log("setSession:", data?.session ? "success" : "failed", error?.message ?? "");
-        });
+        supabase.auth
+          .setSession({
+            access_token: decodeURIComponent(accessToken),
+            refresh_token: decodeURIComponent(refreshToken),
+          })
+          .then(({ data, error }) => {
+            console.log(
+              "setSession:",
+              data?.session ? "success" : "failed",
+              error?.message ?? ""
+            );
+          });
       }
     } catch (e) {
       console.error("Deep link parse error:", e);
@@ -135,7 +141,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.access_token) {
         tokenRef.current = session.access_token;
         setAuthReady(true);
@@ -148,7 +156,7 @@ export default function App() {
       }
     });
     return () => subscription.unsubscribe();
-  }, []);
+  }, [authReady]);
 
   useEffect(() => {
     const unlisten = onOpenUrl((urls) => handleDeepLink(urls[0]));
@@ -219,9 +227,10 @@ export default function App() {
       return { rawText, newHistory };
     } catch (err: unknown) {
       if (err instanceof Error) {
-        const msg = err.name === "AbortError"
-          ? "Server is waking up — try again in 30 seconds."
-          : "Error: " + err.message;
+        const msg =
+          err.name === "AbortError"
+            ? "Server is waking up - try again in 30 seconds."
+            : "Error: " + err.message;
         setMessages((prev) => [...prev, { role: "ai", text: msg }]);
       }
       return null;
@@ -240,18 +249,24 @@ export default function App() {
       if (!r.answer || !r.type) return null;
       return {
         answer: String(r.answer),
-        type: r.type === "text_input" ? "text_input" as const : "multiple_choice" as const,
-        confidence: typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6,
-        option_index: typeof r.option_index === "number" && [1, 2, 3, 4].includes(r.option_index)
-          ? r.option_index : null,
+        type: r.type === "text_input" ? ("text_input" as const) : ("multiple_choice" as const),
+        confidence:
+          typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6,
+        option_index:
+          typeof r.option_index === "number" && [1, 2, 3, 4].includes(r.option_index)
+            ? r.option_index
+            : null,
       };
     };
 
     const extractJson = (text: string): string | null => {
       const start = text.search(/[\[{]/);
       if (start < 0) return null;
-      let depth = 0, inString = false, escaped = false;
-      const open = text[start], close = open === "[" ? "]" : "}";
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      const open = text[start];
+      const close = open === "[" ? "]" : "}";
       for (let i = start; i < text.length; i++) {
         const ch = text[i];
         if (inString) {
@@ -260,7 +275,10 @@ export default function App() {
           else if (ch === '"') inString = false;
           continue;
         }
-        if (ch === '"') { inString = true; continue; }
+        if (ch === '"') {
+          inString = true;
+          continue;
+        }
         if (ch === open) depth++;
         if (ch === close && --depth === 0) return text.slice(start, i + 1);
       }
@@ -277,10 +295,14 @@ export default function App() {
       if (!chunk) return null;
       const d = JSON.parse(chunk);
       return normalize(Array.isArray(d) ? d[0] : d);
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   };
 
-  const analyzeScreen = async (base64Image: string): Promise<{
+  const analyzeScreen = async (
+    base64Image: string
+  ): Promise<{
     analysis: {
       answer: string;
       type: "multiple_choice" | "text_input";
@@ -290,8 +312,9 @@ export default function App() {
     reason?: string;
   }> => {
     try {
-      if (!base64Image || base64Image.length < 100)
+      if (!base64Image || base64Image.length < 100) {
         return { analysis: null, reason: "Screenshot empty." };
+      }
 
       for (let attempt = 1; attempt <= 2; attempt++) {
         const res = await fetch(ANALYZE_URL, {
@@ -299,17 +322,25 @@ export default function App() {
           headers: authHeaders(),
           body: JSON.stringify({ base64Image }),
         });
-        if (!res.ok) { await sleep(300); continue; }
+        if (!res.ok) {
+          await sleep(300);
+          continue;
+        }
         const data = await res.json();
         if (data?.answer && data?.type) {
           return {
             analysis: {
               answer: String(data.answer),
               type: data.type === "text_input" ? "text_input" : "multiple_choice",
-              confidence: typeof data.confidence === "number"
-                ? Math.max(0, Math.min(1, data.confidence)) : 0.7,
-              option_index: typeof data.option_index === "number" && [1, 2, 3, 4].includes(data.option_index)
-                ? data.option_index : null,
+              confidence:
+                typeof data.confidence === "number"
+                  ? Math.max(0, Math.min(1, data.confidence))
+                  : 0.7,
+              option_index:
+                typeof data.option_index === "number" &&
+                [1, 2, 3, 4].includes(data.option_index)
+                  ? data.option_index
+                  : null,
             },
           };
         }
@@ -321,12 +352,15 @@ export default function App() {
         headers: authHeaders(),
         body: JSON.stringify({
           base64Image,
-          message: 'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=first option, 2=second, etc. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
+          message:
+            'Analyze this quiz screenshot. Return ONLY raw JSON, no markdown: {"answer":"exact full text of the correct option as shown on screen","type":"multiple_choice","confidence":0.95,"option_index":1}. option_index is 1=first option, 2=second, etc. If no quiz visible: {"answer":"","type":"multiple_choice","confidence":0,"option_index":null}',
           history: [],
         }),
       });
 
-      if (!fallbackRes.ok) return { analysis: null, reason: `Fallback error ${fallbackRes.status}` };
+      if (!fallbackRes.ok) {
+        return { analysis: null, reason: `Fallback error ${fallbackRes.status}` };
+      }
 
       const fallbackData = await fallbackRes.json();
       const parsed = parseAnalyzeJson(String(fallbackData?.result || ""));
@@ -342,16 +376,21 @@ export default function App() {
     optionIndex: number
   ): Promise<boolean> => {
     try {
-      const positions = await invoke<[number, number][]>(
-        "find_option_positions",
-        { base64Image, maxOptions: 8 }
-      );
+      const positions = await invoke<[number, number][]>("find_option_positions", {
+        base64Image,
+        maxOptions: 4,
+      });
 
-      setMessages(prev => [...prev, {
-        role: "ai",
-        text: `Detected ${positions.length} option(s): ${positions.map(p => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`).join(" ")} — targeting #${optionIndex}`,
-        isAutomation: true,
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Detected ${positions.length} option(s): ${positions
+            .map((p) => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`)
+            .join(" ")} - targeting #${optionIndex}`,
+          isAutomation: true,
+        },
+      ]);
 
       if (positions.length === 0) return false;
 
@@ -366,8 +405,8 @@ export default function App() {
 
       await invoke("hide_window").catch(() => {});
       await sleep(150);
-      setAutomationStatus(`Clicking option ${optionIndex}…`);
-      await invoke("click_at", { x: target[0], y: target[1] });
+      setAutomationStatus(`Clicking option ${optionIndex}...`);
+      await invoke("click_at", { x: target[0] + 0.015, y: target[1] });
       await sleep(1200);
       await invoke("show_window").catch(() => {});
       return true;
@@ -384,11 +423,13 @@ export default function App() {
       try {
         if (action.type === "click" && action.x !== undefined && action.y !== undefined) {
           if (!isSafeClickPoint(action.x, action.y)) continue;
-          setAutomationStatus(`Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`);
+          setAutomationStatus(
+            `Clicking (${Math.round(action.x * 100)}%, ${Math.round(action.y * 100)}%)`
+          );
           await invoke("click_at", { x: action.x, y: action.y });
           await sleep(120);
         } else if (action.type === "type" && action.text) {
-          setAutomationStatus(`Typing…`);
+          setAutomationStatus("Typing...");
           await invoke("type_text", { text: action.text });
           await sleep(100);
         } else if (action.type === "wait") {
@@ -406,15 +447,19 @@ export default function App() {
     if (isLoading || isAutomating) return;
     stopAutomationRef.current = false;
     setIsAutomating(true);
-    setMessages(prev => [...prev, { role: "user", text: "Auto-answering quiz…" }]);
+    setMessages((prev) => [...prev, { role: "user", text: "Auto-answering quiz..." }]);
 
     let round = 0;
     let consecutiveFailures = 0;
     let lastReason = "";
 
-    while (round < MAX_AUTOMATION_ROUNDS && consecutiveFailures < 3 && !stopAutomationRef.current) {
+    while (
+      round < MAX_AUTOMATION_ROUNDS &&
+      consecutiveFailures < 3 &&
+      !stopAutomationRef.current
+    ) {
       round++;
-      setAutomationStatus(`Round ${round} — analyzing…`);
+      setAutomationStatus(`Round ${round} - analyzing...`);
       setTimeout(scrollToBottom, 50);
 
       const screenBase64 = await captureQuizScreenshot();
@@ -425,42 +470,56 @@ export default function App() {
       if (!analysis) {
         consecutiveFailures++;
         lastReason = reason || "Unknown failure";
-        setMessages(prev => [...prev, {
-          role: "ai",
-          text: `Round ${round}: Analyze failed — ${lastReason}`,
-          isAutomation: true,
-        }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: `Round ${round}: Analyze failed - ${lastReason}`,
+            isAutomation: true,
+          },
+        ]);
         await sleep(1000);
         continue;
       }
 
       if (!analysis.answer || analysis.confidence < 0.35) {
-        setMessages(prev => [...prev, {
-          role: "ai",
-          text: "No quiz question detected. Stopping.",
-          isAutomation: true,
-        }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "No quiz question detected. Stopping.",
+            isAutomation: true,
+          },
+        ]);
         break;
       }
 
       consecutiveFailures = 0;
 
-      setMessages(prev => [...prev, {
-        role: "ai",
-        text: `Answer: ${analysis.answer}${analysis.option_index ? ` (option ${analysis.option_index})` : ""}`,
-        isAutomation: true,
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Answer: ${analysis.answer}${
+            analysis.option_index ? ` (option ${analysis.option_index})` : ""
+          }`,
+          isAutomation: true,
+        },
+      ]);
 
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
-        setAutomationStatus(`Locating option ${idx}…`);
+        setAutomationStatus(`Locating option ${idx}...`);
         const clicked = await clickOptionByIndex(screenBase64, idx);
         if (!clicked) {
-          setMessages(prev => [...prev, {
-            role: "ai",
-            text: `Could not find option ${idx}. Skipping.`,
-            isAutomation: true,
-          }]);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "ai",
+              text: `Could not find option ${idx}. Skipping.`,
+              isAutomation: true,
+            },
+          ]);
           consecutiveFailures++;
           await sleep(500);
           continue;
@@ -468,7 +527,7 @@ export default function App() {
       } else {
         await invoke("hide_window").catch(() => {});
         await sleep(150);
-        setAutomationStatus(`Typing answer…`);
+        setAutomationStatus("Typing answer...");
         await invoke("click_at", { x: 0.5, y: 0.55 });
         await sleep(200);
         await invoke("type_text", { text: analysis.answer });
@@ -480,12 +539,11 @@ export default function App() {
 
       if (stopAutomationRef.current) break;
 
-      // Progress check
-      setAutomationStatus(`Round ${round} — checking progress…`);
+      setAutomationStatus(`Round ${round} - checking progress...`);
       const afterScreen = await captureQuizScreenshot();
 
       const progressRes = await fetchFromServer(
-        "[AUTO] Look at this screen carefully. Reply with exactly one of these words only: NEXT_BUTTON if there is a visible Next or Continue button to click to proceed, QUESTION_CHANGED if the question has changed to a new unanswered question, SAME_QUESTION if the same question is still showing unanswered, QUIZ_COMPLETE if there are no more questions and the quiz appears finished.",
+        "[AUTO] Look at this screen. Is there a radio button or checkbox that appears selected or filled in? Reply YES_SELECTED if an answer appears to be selected, NO_SELECTION if nothing is selected, NEXT_BUTTON if there is a Next or Continue button visible, QUIZ_COMPLETE if the quiz is finished.",
         afterScreen,
         []
       );
@@ -494,27 +552,31 @@ export default function App() {
       console.log("Progress check:", progressText);
 
       if (progressText.includes("QUIZ_COMPLETE")) {
-        setMessages(prev => [...prev, { role: "ai", text: "✓ Task complete.", isAutomation: true }]);
+        setMessages((prev) => [
+          ...prev,
+          { role: "ai", text: "Task complete.", isAutomation: true },
+        ]);
         break;
       }
 
-      if (progressText.includes("NEXT_BUTTON")) {
+      if (progressText.includes("NEXT_BUTTON") || progressText.includes("YES_SELECTED")) {
         await invoke("hide_window").catch(() => {});
         await sleep(150);
         await invoke("click_at", { x: 0.85, y: 0.88 });
-        await sleep(1000);
+        await sleep(1200);
         await invoke("show_window").catch(() => {});
-        setAutomationStatus(`Clicked Next — loading next question…`);
-        await sleep(500);
-      }
-
-      if (progressText.includes("SAME_QUESTION")) {
+        setAutomationStatus("Moving to next question...");
+        await sleep(600);
+      } else if (progressText.includes("NO_SELECTION")) {
         consecutiveFailures++;
-        setMessages(prev => [...prev, {
-          role: "ai",
-          text: `Round ${round}: Answer did not register, retrying…`,
-          isAutomation: true,
-        }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: `Round ${round}: Click did not register, retrying...`,
+            isAutomation: true,
+          },
+        ]);
       }
 
       await sleep(300);
@@ -522,19 +584,28 @@ export default function App() {
     }
 
     if (stopAutomationRef.current) {
-      setMessages(prev => [...prev, { role: "ai", text: "Automation stopped.", isAutomation: true }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "ai", text: "Automation stopped.", isAutomation: true },
+      ]);
     } else if (consecutiveFailures >= 3) {
-      setMessages(prev => [...prev, {
-        role: "ai",
-        text: `Stopped after 3 consecutive failures. Last error: ${lastReason}`,
-        isAutomation: true,
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Stopped after 3 consecutive failures. Last error: ${lastReason}`,
+          isAutomation: true,
+        },
+      ]);
     } else if (round >= MAX_AUTOMATION_ROUNDS) {
-      setMessages(prev => [...prev, {
-        role: "ai",
-        text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`,
-        isAutomation: true,
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Reached ${MAX_AUTOMATION_ROUNDS}-round limit.`,
+          isAutomation: true,
+        },
+      ]);
     }
 
     setIsAutomating(false);
@@ -546,7 +617,7 @@ export default function App() {
   const handleStopAutomation = () => {
     if (!isAutomating) return;
     stopAutomationRef.current = true;
-    setAutomationStatus("Stopping…");
+    setAutomationStatus("Stopping...");
   };
 
   const sendToServer = async (
@@ -567,7 +638,7 @@ export default function App() {
     const aiText = stripMarkdown(cleanText);
     const hasActions = actions.length > 0;
 
-    setMessages(prev => [...prev, { role: "ai", text: aiText, isAutomation: hasActions }]);
+    setMessages((prev) => [...prev, { role: "ai", text: aiText, isAutomation: hasActions }]);
     const finalHistory: HistoryEntry[] = [...newHistory, { role: "assistant", content: aiText }];
     setHistory(finalHistory);
     setTimeout(scrollToBottom, 50);
@@ -581,11 +652,14 @@ export default function App() {
   };
 
   const handleSubmit = async () => {
-    if (isAutomating) { handleStopAutomation(); return; }
+    if (isAutomating) {
+      handleStopAutomation();
+      return;
+    }
     if (!message.trim() || isLoading) return;
     const userText = message.trim();
     setMessage("");
-    setMessages(prev => [...prev, { role: "user", text: userText }]);
+    setMessages((prev) => [...prev, { role: "user", text: userText }]);
     await sendToServer(userText);
   };
 
@@ -594,18 +668,28 @@ export default function App() {
     const userText = message.trim();
     const screenBase64 = await invoke<string>("capture_screen");
     setMessage("");
-    setMessages(prev => [...prev, {
-      role: "user", text: userText || "", screenshotOnly: !userText,
-    }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "user",
+        text: userText || "",
+        screenshotOnly: !userText,
+      },
+    ]);
     await sendToServer(userText, screenBase64);
   };
 
   const handleAskGroq = useCallback(
     async (base64Image: string, userMessage?: string) => {
       const userText = userMessage?.trim() || "";
-      setMessages(prev => [...prev, {
-        role: "user", text: userText || "", screenshotOnly: !userText,
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          text: userText || "",
+          screenshotOnly: !userText,
+        },
+      ]);
       await sendToServer(userText, base64Image, history);
     },
     [history]
@@ -613,12 +697,21 @@ export default function App() {
 
   useEffect(() => {
     const shortcuts = [
-      "CommandOrControl+Shift+G", "CommandOrControl+B", "Control+H",
-      "Control+Left", "Control+Right", "Control+Up", "Control+Down",
+      "CommandOrControl+Shift+G",
+      "CommandOrControl+B",
+      "Control+H",
+      "Control+Left",
+      "Control+Right",
+      "Control+Up",
+      "Control+Down",
     ];
 
     const setupShortcuts = async () => {
-      for (const s of shortcuts) { try { await unregister(s); } catch (_) {} }
+      for (const s of shortcuts) {
+        try {
+          await unregister(s);
+        } catch (_) {}
+      }
       await register("CommandOrControl+Shift+G", async () => {
         const screenBase64 = await invoke<string>("capture_screen");
         handleAskGroq(screenBase64, message);
@@ -628,40 +721,54 @@ export default function App() {
         await invoke("show_window");
         await getCurrentWindow().setFocus();
       });
-      await register("Control+H", async () => { await invoke("hide_window"); });
+      await register("Control+H", async () => {
+        await invoke("hide_window");
+      });
       const STEP = 40;
       await register("Control+Left", async () => {
-        const win = getCurrentWindow(); const pos = await win.outerPosition();
+        const win = getCurrentWindow();
+        const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x - STEP, y: pos.y } as any);
       });
       await register("Control+Right", async () => {
-        const win = getCurrentWindow(); const pos = await win.outerPosition();
+        const win = getCurrentWindow();
+        const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x + STEP, y: pos.y } as any);
       });
       await register("Control+Up", async () => {
-        const win = getCurrentWindow(); const pos = await win.outerPosition();
+        const win = getCurrentWindow();
+        const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x, y: pos.y - STEP } as any);
       });
       await register("Control+Down", async () => {
-        const win = getCurrentWindow(); const pos = await win.outerPosition();
+        const win = getCurrentWindow();
+        const pos = await win.outerPosition();
         await win.setPosition({ type: "Physical", x: pos.x, y: pos.y + STEP } as any);
       });
     };
 
     setupShortcuts();
-    return () => { shortcuts.forEach(s => unregister(s)); };
+    return () => {
+      shortcuts.forEach((s) => unregister(s));
+    };
   }, [handleAskGroq, message]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
   };
 
   const copyLastResponse = () => {
-    const lastAi = [...messages].reverse().find(m => m.role === "ai" && !m.isLimit);
+    const lastAi = [...messages].reverse().find((m) => m.role === "ai" && !m.isLimit);
     if (lastAi) navigator.clipboard.writeText(lastAi.text);
   };
 
-  const clearConversation = () => { setMessages([]); setHistory([]); };
+  const clearConversation = () => {
+    setMessages([]);
+    setHistory([]);
+  };
 
   const isLimitReached = messages.length > 0 && messages[messages.length - 1].isLimit;
   const isBlocked = isLoading || isAutomating;
@@ -670,27 +777,65 @@ export default function App() {
     <div className="hud-root">
       <div className="hud-panel">
         <div className="hud-header" data-tauri-drag-region>
-          <span className="hud-title" data-tauri-drag-region>agrade</span>
+          <span className="hud-title" data-tauri-drag-region>
+            agrade
+          </span>
           <div className="hud-header-actions">
             {messages.length > 0 && !isLimitReached && (
               <>
-                <button className="hud-action-btn" onClick={copyLastResponse} title="Copy last response">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <button
+                  className="hud-action-btn"
+                  onClick={copyLastResponse}
+                  title="Copy last response"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
                     <rect x="9" y="9" width="13" height="13" rx="2" />
                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                   </svg>
                 </button>
-                <button className="hud-action-btn" onClick={clearConversation} title="Clear conversation">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <button
+                  className="hud-action-btn"
+                  onClick={clearConversation}
+                  title="Clear conversation"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
                     <polyline points="3 6 5 6 21 6" />
                     <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                    <path d="M10 11v6" /><path d="M14 11v6" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
                   </svg>
                 </button>
               </>
             )}
             <button className="hud-action-btn" onClick={handleSignOut} title="Sign out">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                 <polyline points="16 17 21 12 16 7" />
                 <line x1="21" y1="12" x2="9" y2="12" />
@@ -708,23 +853,36 @@ export default function App() {
                   <div className="hud-bubble user">
                     {msg.screenshotOnly ? (
                       <div className="hud-screenshot-tag">
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <svg
+                          width="11"
+                          height="11"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
                           <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                           <circle cx="12" cy="13" r="4" />
                         </svg>
                         Screenshot captured
                       </div>
-                    ) : msg.text}
+                    ) : (
+                      msg.text
+                    )}
                   </div>
                 </div>
               ) : msg.isLimit ? (
                 <div key={i} className="hud-limit-block">
                   <p className="hud-limit-text">You've used your 5 free messages</p>
-                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>Upgrade to Pro</button>
+                  <button className="hud-upgrade-btn" onClick={handleUpgrade}>
+                    Upgrade to Pro
+                  </button>
                 </div>
               ) : (
                 <div key={i} className={`hud-ai-response${msg.isAutomation ? " hud-ai-automation" : ""}`}>
-                  {msg.isAutomation && <span className="hud-automation-badge">⚡ automated</span>}
+                  {msg.isAutomation && <span className="hud-automation-badge">automated</span>}
                   {msg.text}
                 </div>
               )
@@ -733,7 +891,7 @@ export default function App() {
             {isAutomating && (
               <div className="hud-automation-status">
                 <span className="hud-automation-spinner" />
-                {automationStatus || "Automating…"}
+                {automationStatus || "Automating..."}
               </div>
             )}
           </div>
@@ -742,14 +900,42 @@ export default function App() {
         {!isLimitReached && (
           <div className="hud-footer">
             <div className="hud-footer-row">
-              <button className="hud-icon-btn" onClick={handleCaptureWithMessage} disabled={isBlocked} title="Capture screen">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <button
+                className="hud-icon-btn"
+                onClick={handleCaptureWithMessage}
+                disabled={isBlocked}
+                title="Capture screen"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
-              <button className="hud-icon-btn" onClick={handleAutoAnswer} disabled={isBlocked} title="Auto-answer quiz">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <button
+                className="hud-icon-btn"
+                onClick={handleAutoAnswer}
+                disabled={isBlocked}
+                title="Auto-answer quiz"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                 </svg>
               </button>
@@ -757,7 +943,11 @@ export default function App() {
                 <textarea
                   ref={inputRef}
                   className="hud-input"
-                  placeholder={isAutomating ? automationStatus || "Automating…" : "Ask anything or capture screen…"}
+                  placeholder={
+                    isAutomating
+                      ? automationStatus || "Automating..."
+                      : "Ask anything or capture screen..."
+                  }
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
