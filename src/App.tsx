@@ -238,12 +238,21 @@ export default function App() {
   };
 
   // ── Analyze screen — returns answer as structured JSON ────────────────────
-  const analyzeScreen = async (base64Image: string): Promise<{
-    answer: string;
-    type: "multiple_choice" | "text_input";
-    confidence: number;
-  } | null> => {
+  const analyzeScreen = async (
+    base64Image: string
+  ): Promise<{
+    analysis: {
+      answer: string;
+      type: "multiple_choice" | "text_input";
+      confidence: number;
+    } | null;
+    reason?: string;
+  }> => {
     try {
+      if (!base64Image || base64Image.length < 100) {
+        return { analysis: null, reason: "Screenshot appears empty or too small." };
+      }
+
       // Primary path: dedicated /analyze endpoint
       for (let attempt = 1; attempt <= 2; attempt++) {
         const res = await fetch(ANALYZE_URL, {
@@ -252,19 +261,31 @@ export default function App() {
           body: JSON.stringify({ base64Image }),
         });
         if (!res.ok) {
-          console.error("Analyze failed:", res.status, await res.text());
+          const detail = (await res.text()).slice(0, 180);
+          const reason =
+            res.status === 401
+              ? "Unauthorized (401) - sign in again."
+              : res.status === 429
+                ? "Rate limit reached (429)."
+                : `Analyze endpoint error (${res.status})${detail ? `: ${detail}` : ""}`;
+          console.error("Analyze failed:", reason);
+          if (attempt === 2) {
+            // continue to fallback path after final primary attempt
+          }
           await sleep(250);
           continue;
         }
         const data = await res.json();
         if (data?.answer && data?.type) {
           return {
-            answer: String(data.answer),
-            type: data.type === "text_input" ? "text_input" : "multiple_choice",
-            confidence:
-              typeof data.confidence === "number"
-                ? Math.max(0, Math.min(1, data.confidence))
-                : 0.7,
+            analysis: {
+              answer: String(data.answer),
+              type: data.type === "text_input" ? "text_input" : "multiple_choice",
+              confidence:
+                typeof data.confidence === "number"
+                  ? Math.max(0, Math.min(1, data.confidence))
+                  : 0.7,
+            },
           };
         }
       }
@@ -280,13 +301,32 @@ export default function App() {
           history: [],
         }),
       });
-      if (!fallbackRes.ok) return null;
+      if (!fallbackRes.ok) {
+        const detail = (await fallbackRes.text()).slice(0, 180);
+        return {
+          analysis: null,
+          reason:
+            fallbackRes.status === 401
+              ? "Unauthorized (401) on fallback."
+              : fallbackRes.status === 429
+                ? "Rate limit reached (429) on fallback."
+                : `Fallback endpoint error (${fallbackRes.status})${detail ? `: ${detail}` : ""}`,
+        };
+      }
       const fallbackData = await fallbackRes.json();
       const rawText = String(fallbackData?.result || "");
-      return parseAnalyzeJson(rawText);
+      const parsed = parseAnalyzeJson(rawText);
+      if (parsed) return { analysis: parsed };
+      return {
+        analysis: null,
+        reason: `Fallback returned non-JSON/invalid JSON. Raw: ${rawText.slice(0, 160)}`,
+      };
     } catch (err) {
       console.error("analyzeScreen exception:", err);
-      return null;
+      return {
+        analysis: null,
+        reason: err instanceof Error ? err.message : "Unknown analyze exception",
+      };
     }
   };
 
@@ -360,6 +400,7 @@ export default function App() {
 
     let round = 0;
     let consecutiveFailures = 0;
+    let lastAnalyzeReason = "";
 
     while (round < MAX_AUTOMATION_ROUNDS && consecutiveFailures < 3) {
       round++;
@@ -367,11 +408,22 @@ export default function App() {
       setTimeout(scrollToBottom, 50);
 
       const screenBase64 = await invoke<string>("capture_screen");
-      const analysis = await analyzeScreen(screenBase64);
+      const analyzeResult = await analyzeScreen(screenBase64);
+      const analysis = analyzeResult.analysis;
 
       if (!analysis) {
         consecutiveFailures++;
-        setAutomationStatus(`Round ${round} — analyze failed, retrying…`);
+        lastAnalyzeReason = analyzeResult.reason || "Unknown analyze failure";
+        setAutomationStatus(
+          `Round ${round} — analyze failed (${lastAnalyzeReason.slice(0, 70)}), retrying...`
+        );
+        if (consecutiveFailures === 1) {
+          setMessages((prev) => [...prev, {
+            role: "ai",
+            text: `Analyze failed: ${lastAnalyzeReason}`,
+            isAutomation: true,
+          }]);
+        }
         await sleep(1000);
         continue;
       }
@@ -454,7 +506,7 @@ export default function App() {
     if (consecutiveFailures >= 3) {
       setMessages((prev) => [...prev, {
         role: "ai",
-        text: "Could not analyze screen after multiple attempts. Make sure a quiz is visible.",
+        text: `Could not analyze screen after multiple attempts. Last error: ${lastAnalyzeReason || "Unknown failure"}`,
         isAutomation: true,
       }]);
     }
