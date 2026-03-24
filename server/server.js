@@ -286,6 +286,60 @@ AUTONOMOUS LOOP — YOU ARE RUNNING WITHOUT A HUMAN:
   }
 });
 
+app.post("/analyze", express.json({ limit: "10mb" }), async (req, res) => {
+  try {
+    const { base64Image } = req.body;
+    const token = req.headers.authorization?.replace("Bearer ", "");
+
+    const user = await getUserFromToken(token);
+    if (!user) return res.status(401).json({ error: "Unauthorized" });
+
+    const subscription = await getSubscription(user.id);
+    if (!subscription) {
+      const usage = await checkAndIncrementUsage(user.id);
+      if (!usage.allowed) return res.status(429).json({ error: "Limit reached" });
+    }
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "meta-llama/llama-4-maverick-17b-16e-instruct",
+        messages: [
+          {
+            role: "system",
+            content: `You are a quiz answering assistant. You will be shown a screenshot of a quiz question.
+Respond ONLY with a JSON object, no other text, no markdown, no explanation.
+Format: {"answer": "exact text of correct option", "type": "multiple_choice" or "text_input", "confidence": 0.0-1.0}
+For multiple choice: answer must be the EXACT text of the correct option as it appears on screen.
+For text input: answer is the text to type into the field.`,
+          },
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}` } },
+              { type: "text", text: "What is the correct answer to the question on screen? Reply with JSON only." },
+            ],
+          },
+        ],
+        max_tokens: 100,
+      }),
+    });
+
+    const data = await response.json();
+    const raw = data.choices[0].message.content;
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    res.json(parsed);
+  } catch (err) {
+    console.error("Analyze error:", err.message);
+    res.status(500).json({ error: "Analysis failed" });
+  }
+});
+
 app.post("/referral", express.json(), async (req, res) => {
   try {
     const token = req.headers.authorization?.replace("Bearer ", "");
