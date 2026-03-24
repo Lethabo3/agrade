@@ -13,6 +13,7 @@ const ANALYZE_URL = "https://agrade-cbwf.onrender.com/analyze";
 const LOGIN_URL = "https://agradee.online/login.html?source=app";
 const PRICING_BASE_URL = "https://agradee.online/pricing.html";
 const MAX_AUTOMATION_ROUNDS = 30;
+const MIN_OPTION_Y_GAP = 0.04;
 
 const supabase = createClient(
   "https://llabvdbcvilnbukroqxn.supabase.co",
@@ -114,6 +115,14 @@ export default function App() {
     if (y < 0.15 || y > 0.93) return false;
     if (x > 0.82 && y < 0.06) return false;
     return true;
+  };
+
+  const scrollPageDown = async () => {
+    await invoke("hide_window").catch(() => {});
+    await sleep(150);
+    await invoke("scroll_down", { amount: 3 });
+    await sleep(600);
+    await invoke("show_window").catch(() => {});
   };
 
   const handleDeepLink = (url: string) => {
@@ -376,10 +385,15 @@ export default function App() {
     optionIndex: number
   ): Promise<boolean> => {
     try {
-      const positions = await invoke<[number, number][]>("find_option_positions", {
+      const rawPositions = await invoke<[number, number][]>("find_option_positions", {
         base64Image,
         maxOptions: 4,
       });
+
+      // Filter out positions that are clustered too tightly on the y-axis
+      const positions = rawPositions.filter((pos, i) =>
+        i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
+      );
 
       setMessages((prev) => [
         ...prev,
@@ -406,7 +420,8 @@ export default function App() {
       await invoke("hide_window").catch(() => {});
       await sleep(150);
       setAutomationStatus(`Clicking option ${optionIndex}...`);
-      await invoke("click_at", { x: target[0] + 0.015, y: target[1] });
+      // Increased x offset to land in the center of the option, with slight y nudge
+      await invoke("click_at", { x: target[0] + 0.045, y: target[1] + 0.005 });
       await sleep(1200);
       await invoke("show_window").catch(() => {});
       return true;
@@ -516,10 +531,12 @@ export default function App() {
             ...prev,
             {
               role: "ai",
-              text: `Could not find option ${idx}. Skipping.`,
+              text: `Could not find option ${idx}. Scrolling and retrying...`,
               isAutomation: true,
             },
           ]);
+          setAutomationStatus("Scrolling to find options...");
+          await scrollPageDown();
           consecutiveFailures++;
           await sleep(500);
           continue;
@@ -568,15 +585,17 @@ export default function App() {
         setAutomationStatus("Moving to next question...");
         await sleep(600);
       } else if (progressText.includes("NO_SELECTION")) {
-        consecutiveFailures++;
         setMessages((prev) => [
           ...prev,
           {
             role: "ai",
-            text: `Round ${round}: Click did not register, retrying...`,
+            text: `Round ${round}: Click did not register. Scrolling and retrying...`,
             isAutomation: true,
           },
         ]);
+        setAutomationStatus("Scrolling to retry...");
+        await scrollPageDown();
+        consecutiveFailures++;
       }
 
       await sleep(300);
