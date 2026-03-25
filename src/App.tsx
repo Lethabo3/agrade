@@ -400,63 +400,125 @@ export default function App() {
   };
 
   // ------------------------------------------------------------------
-  // clickOptionByIndex — tries UIA radio button detection first,
-  // falls back to existing pixel-scan path if UIA returns nothing.
+  // clickOptionByIndex — tries UIA label matching first, then UIA index,
+  // then falls back to pixel-scan path if UIA returns nothing.
   // ------------------------------------------------------------------
   const clickOptionByIndex = async (
     base64Image: string,
-    optionIndex: number
+    optionIndex: number,
+    answerText?: string
   ): Promise<boolean> => {
     try {
-      // --- Pass 1: UIA (preferred) ---
-      let uiaPositions: [number, number][] = [];
-      try {
-        uiaPositions = await invoke<[number, number][]>("find_radio_buttons_uia");
-      } catch {
-        // UIA command not available (e.g. non-Windows build) — proceed to pixel scan
+      const normalizeText = (s: string) =>
+        s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      let matched: [number, number] | null = null;
+
+      // --- Pass 1: UIA with label matching (most reliable) ---
+      if (answerText) {
+        try {
+          const labeled = await invoke<[number, number, string][]>(
+            "find_radio_buttons_with_labels"
+          );
+          if (labeled.length > 0) {
+            const needle = normalizeText(answerText);
+
+            // Try exact normalized match first
+            let best = labeled.find(([, , label]) => normalizeText(label) === needle);
+
+            // Fall back to substring match
+            if (!best) {
+              best = labeled.find(
+                ([, , label]) =>
+                  needle.includes(normalizeText(label)) ||
+                  normalizeText(label).includes(needle)
+              );
+            }
+
+            if (best) {
+              matched = [best[0], best[1]];
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: "ai",
+                  text: `[UIA-text] Matched "${best![2]}" → (${Math.round(best![0] * 100)}%,${Math.round(best![1] * 100)}%)`,
+                  isAutomation: true,
+                },
+              ]);
+            } else {
+              // Text match failed — fall back to index within the labeled set
+              const sorted = labeled.map(([x, y]) => [x, y] as [number, number]);
+              const idx = Math.min(optionIndex - 1, sorted.length - 1);
+              if (sorted[idx]) {
+                matched = sorted[idx];
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: "ai",
+                    text: `[UIA-idx] Text match failed, using index #${optionIndex} of ${sorted.length}`,
+                    isAutomation: true,
+                  },
+                ]);
+              }
+            }
+          }
+        } catch {
+          // find_radio_buttons_with_labels not available — fall through
+        }
       }
 
-      // --- Pass 2: pixel scan fallback ---
-      const rawPositions: [number, number][] =
-        uiaPositions.length > 0
-          ? uiaPositions
-          : await invoke<[number, number][]>("find_option_positions", {
-              base64Image,
-              maxOptions: 24,
-            });
+      // --- Pass 2: Legacy UIA positions (no labels) ---
+      if (!matched) {
+        let uiaPositions: [number, number][] = [];
+        try {
+          uiaPositions = await invoke<[number, number][]>("find_radio_buttons_uia");
+        } catch {
+          // UIA not available on this platform
+        }
 
-      // Remove positions clustered too tightly on the y-axis (likely mis-detections)
-      const positions = rawPositions.filter((pos, i) =>
-        i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
-      );
+        // --- Pass 3: pixel scan fallback ---
+        const rawPositions: [number, number][] =
+          uiaPositions.length > 0
+            ? uiaPositions
+            : await invoke<[number, number][]>("find_option_positions", {
+                base64Image,
+                maxOptions: 24,
+              });
 
-      const source = uiaPositions.length > 0 ? "UIA" : "pixel";
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: `[${source}] Detected ${positions.length} option(s): ${positions
-            .map((p) => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`)
-            .join(" ")} — targeting #${optionIndex}`,
-          isAutomation: true,
-        },
-      ]);
+        // Remove positions clustered too tightly on the y-axis
+        const positions = rawPositions.filter(
+          (pos, i) =>
+            i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
+        );
 
-      if (positions.length === 0) return false;
+        const source = uiaPositions.length > 0 ? "UIA" : "pixel";
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: `[${source}] Detected ${positions.length} option(s): ${positions
+              .map((p) => `(${Math.round(p[0] * 100)}%,${Math.round(p[1] * 100)}%)`)
+              .join(" ")} — targeting #${optionIndex}`,
+            isAutomation: true,
+          },
+        ]);
 
-      const idx = Math.min(optionIndex - 1, positions.length - 1);
-      const target = positions[idx];
-      if (!target) return false;
+        if (positions.length === 0) return false;
+        const idx = Math.min(optionIndex - 1, positions.length - 1);
+        matched = positions[idx] ?? null;
+      }
 
-      if (!isSafeClickPoint(target[0], target[1])) {
-        console.warn("Blocked unsafe click at", target);
+      if (!matched) return false;
+
+      if (!isSafeClickPoint(matched[0], matched[1])) {
+        console.warn("Blocked unsafe click at", matched);
         return false;
       }
 
       await invoke("hide_window").catch(() => {});
       await sleep(150);
       setAutomationStatus(`Clicking option ${optionIndex}...`);
-      await invoke("click_at", { x: target[0], y: target[1] });
+      await invoke("click_at", { x: matched[0], y: matched[1] });
       await sleep(1200);
       await invoke("show_window").catch(() => {});
       return true;
@@ -589,7 +651,8 @@ export default function App() {
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
         setAutomationStatus(`Locating choice #${idx}...`);
-        const clicked = await clickOptionByIndex(screenBase64, idx);
+        // Pass answerText so UIA can match by label instead of index
+        const clicked = await clickOptionByIndex(screenBase64, idx, analysis.answer);
         if (!clicked) {
           return { result: "failed", reason: "Could not detect or click that choice" };
         }
