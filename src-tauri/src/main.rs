@@ -446,8 +446,6 @@ fn find_option_positions(base64_image: String, max_options: usize) -> Vec<(f64, 
 fn find_radio_buttons_uia() -> Vec<(f64, f64)> {
     #[cfg(target_os = "windows")]
     unsafe {
-        // CoInitializeEx is safe to call multiple times on the same thread;
-        // ignore the "already initialized" HRESULT.
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
         let automation: IUIAutomation =
@@ -479,8 +477,80 @@ fn find_radio_buttons_uia() -> Vec<(f64, f64)> {
         let sh = GetSystemMetrics(SM_CYSCREEN) as f64;
         if sw == 0.0 || sh == 0.0 { return vec![]; }
 
-        // Collect (normalized_x, normalized_y, raw_top_for_sort)
         let mut results: Vec<(f64, f64, i32)> = Vec::new();
+
+        for i in 0..count {
+            let el = match elements.GetElement(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let rect = match el.CurrentBoundingRectangle() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if rect.right <= rect.left || rect.bottom <= rect.top { continue; }
+            if rect.left < 0 || rect.top < 0 { continue; }
+
+            let cx = ((rect.left + rect.right) as f64 / 2.0) / sw;
+            let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
+
+            // Relaxed bounds: 10%–90% vertically to capture options near top/bottom
+            if cx < 0.02 || cx > 0.50 { continue; }
+            if cy < 0.10 || cy > 0.90 { continue; }
+
+            results.push((cx, cy, rect.top));
+        }
+
+        results.sort_by_key(|r| r.2);
+        return results.into_iter().map(|(x, y, _)| (x, y)).collect();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    vec![]
+}
+
+/// Returns normalized (x, y, label) tuples for all visible RadioButton elements,
+/// sorted top-to-bottom. The label is the accessible name of each radio button
+/// (i.e. the answer text), which allows the frontend to match by text instead
+/// of relying on a fragile position index.
+#[tauri::command]
+fn find_radio_buttons_with_labels() -> Vec<(f64, f64, String)> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let automation: IUIAutomation =
+            match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                Ok(a) => a,
+                Err(_) => return vec![],
+            };
+
+        let root = match automation.GetRootElement() {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+
+        let condition = match automation.CreatePropertyCondition(
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_RadioButtonControlTypeId.0 as i32),
+        ) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let elements = match root.FindAll(TreeScope_Descendants, &condition) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+
+        let count = elements.Length().unwrap_or(0);
+        let sw = GetSystemMetrics(SM_CXSCREEN) as f64;
+        let sh = GetSystemMetrics(SM_CYSCREEN) as f64;
+        if sw == 0.0 || sh == 0.0 { return vec![]; }
+
+        // Collect (cx, cy, label, raw_top) for sorting
+        let mut results: Vec<(f64, f64, String, i32)> = Vec::new();
 
         for i in 0..count {
             let el = match elements.GetElement(i) {
@@ -499,17 +569,16 @@ fn find_radio_buttons_uia() -> Vec<(f64, f64)> {
             let cx = ((rect.left + rect.right) as f64 / 2.0) / sw;
             let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
 
-            // Only include elements inside the expected quiz option zone
-            // (mirrors the pixel-scan limits so the two paths agree).
-            // Exclude bottom ~28% — sidebar/nav often exposes ghost radios there.
-            if cx < 0.02 || cx > 0.50 { continue; }
-            if cy < 0.15 || cy > 0.72 { continue; }
+            // Same relaxed bounds as find_radio_buttons_uia
+            if cx < 0.02 || cx > 0.60 { continue; }
+            if cy < 0.10 || cy > 0.90 { continue; }
 
-            results.push((cx, cy, rect.top));
+            let label = el.CurrentName().unwrap_or_default().to_string();
+            results.push((cx, cy, label, rect.top));
         }
 
-        results.sort_by_key(|r| r.2);
-        return results.into_iter().map(|(x, y, _)| (x, y)).collect();
+        results.sort_by_key(|r| r.3);
+        return results.into_iter().map(|(x, y, label, _)| (x, y, label)).collect();
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -559,8 +628,6 @@ fn click_next_button_uia() -> bool {
         let sw = GetSystemMetrics(SM_CXSCREEN) as f64;
         let sh = GetSystemMetrics(SM_CYSCREEN) as f64;
 
-        // Ranked keywords — first match across all buttons wins.
-        // Covers the most common quiz platform labels.
         let keywords = [
             "next", "submit", "continue", "confirm",
             "proceed", "check answer", "check", "done", "finish",
@@ -581,7 +648,6 @@ fn click_next_button_uia() -> bool {
 
                 if !name.contains(keyword) { continue; }
 
-                // Skip invisible / zero-size / off-screen elements
                 let rect = match el.CurrentBoundingRectangle() {
                     Ok(r) => r,
                     Err(_) => continue,
@@ -589,7 +655,6 @@ fn click_next_button_uia() -> bool {
                 if rect.right <= rect.left || rect.bottom <= rect.top { continue; }
                 if rect.left < 0 || rect.top < 0 { continue; }
 
-                // Prefer the Invoke pattern — no mouse movement required
                 if let Ok(pattern_obj) = el.GetCurrentPattern(UIA_InvokePatternId) {
                     if let Ok(invoke) = pattern_obj.cast::<IUIAutomationInvokePattern>() {
                         let invoke: IUIAutomationInvokePattern = invoke;
@@ -599,7 +664,6 @@ fn click_next_button_uia() -> bool {
                     }
                 }
 
-                // Fallback: click the element's centre via SendInput
                 let cx = ((rect.left + rect.right) as f64 / 2.0) / sw;
                 let cy = ((rect.top + rect.bottom) as f64 / 2.0) / sh;
                 let abs_x = (cx * 65535.0) as i32;
@@ -662,6 +726,7 @@ fn main() {
             find_option_positions,
             scroll_down,
             find_radio_buttons_uia,
+            find_radio_buttons_with_labels,
             click_next_button_uia,
         ])
         .setup(|app| {
