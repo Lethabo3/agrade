@@ -399,10 +399,6 @@ export default function App() {
     }
   };
 
-  // ------------------------------------------------------------------
-  // clickOptionByIndex — tries UIA label matching first, then UIA index,
-  // then falls back to pixel-scan path if UIA returns nothing.
-  // ------------------------------------------------------------------
   const clickOptionByIndex = async (
     base64Image: string,
     optionIndex: number,
@@ -414,7 +410,6 @@ export default function App() {
 
       let matched: [number, number] | null = null;
 
-      // --- Pass 1: UIA with label matching (most reliable) ---
       if (answerText) {
         try {
           const labeled = await invoke<[number, number, string][]>(
@@ -423,10 +418,8 @@ export default function App() {
           if (labeled.length > 0) {
             const needle = normalizeText(answerText);
 
-            // Try exact normalized match first
             let best = labeled.find(([, , label]) => normalizeText(label) === needle);
 
-            // Fall back to substring match
             if (!best) {
               best = labeled.find(
                 ([, , label]) =>
@@ -446,7 +439,6 @@ export default function App() {
                 },
               ]);
             } else {
-              // Text match failed — fall back to index within the labeled set
               const sorted = labeled.map(([x, y]) => [x, y] as [number, number]);
               const idx = Math.min(optionIndex - 1, sorted.length - 1);
               if (sorted[idx]) {
@@ -467,7 +459,6 @@ export default function App() {
         }
       }
 
-      // --- Pass 2: Legacy UIA positions (no labels) ---
       if (!matched) {
         let uiaPositions: [number, number][] = [];
         try {
@@ -476,7 +467,6 @@ export default function App() {
           // UIA not available on this platform
         }
 
-        // --- Pass 3: pixel scan fallback ---
         const rawPositions: [number, number][] =
           uiaPositions.length > 0
             ? uiaPositions
@@ -485,7 +475,6 @@ export default function App() {
                 maxOptions: 24,
               });
 
-        // Remove positions clustered too tightly on the y-axis
         const positions = rawPositions.filter(
           (pos, i) =>
             i === 0 || Math.abs(pos[1] - rawPositions[i - 1][1]) >= MIN_OPTION_Y_GAP
@@ -651,7 +640,6 @@ export default function App() {
       if (analysis.type === "multiple_choice") {
         const idx = analysis.option_index ?? 1;
         setAutomationStatus(`Locating choice #${idx}...`);
-        // Pass answerText so UIA can match by label instead of index
         const clicked = await clickOptionByIndex(screenBase64, idx, analysis.answer);
         if (!clicked) {
           return { result: "failed", reason: "Could not detect or click that choice" };
@@ -689,7 +677,6 @@ export default function App() {
 
       let scrollPasses = 0;
       let answeredAnythingOnPage = false;
-      /** Exit early after this many viewports in a row with nothing new to answer. */
       let emptyViewportsInRow = 0;
 
       scrollLoop: while (
@@ -1045,11 +1032,6 @@ export default function App() {
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
-                </svg>
-              </button>
-              <button className="hud-icon-btn" onClick={handleAutoAnswer} disabled={isBlocked} title="Auto-answer quiz">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                 </svg>
               </button>
               <div className="hud-input-row">
